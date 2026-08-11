@@ -248,6 +248,10 @@ func (b *azureLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	return fmt.Sprintf("deleted lease=%s server=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
+func (b *azureLeaseBackend) ReleaseLeaseNeedsOwnerGraceFence(LeaseTarget) bool {
+	return true
+}
+
 func (b *azureLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 	return b.DirectSSHBackend.Touch(ctx, req.Lease.Server, req.State), nil
 }

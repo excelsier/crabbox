@@ -41,13 +41,17 @@ type reachableReleaseTestBackend struct {
 	released atomic.Bool
 }
 
-func (b *reachableReleaseTestBackend) ReleaseLeasePreservesReachableTarget() bool {
-	return true
+type destructiveGraceReleaseTestBackend struct {
+	testSSHBackend
 }
 
 func (b *reachableReleaseTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
 	b.released.Store(true)
 	return nil
+}
+
+func (b destructiveGraceReleaseTestBackend) ReleaseLeaseNeedsOwnerGraceFence(LeaseTarget) bool {
+	return true
 }
 
 func (r *blockedRenewWorkspaceOwnerRemote) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
@@ -310,6 +314,26 @@ func TestWorkspaceOwnerTokenAndTransportFailuresFailClosed(t *testing.T) {
 		}
 	})
 
+	t.Run("release preparation preserves default pre-release renewal failures", func(t *testing.T) {
+		remote := newFakeWorkspaceOwnerRemote()
+		owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_default_renew", &bytes.Buffer{}, remote, time.Second, 50*time.Millisecond, 5*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		remote.mu.Lock()
+		remote.failRenew = true
+		remote.mu.Unlock()
+		select {
+		case <-owner.Context().Done():
+		case <-time.After(time.Second):
+			t.Fatal("renewal failure did not cancel lifecycle context")
+		}
+		_, err = prepareWorkspaceOwnerForLeaseRelease(context.Background(), owner, testSSHBackend{}, LeaseTarget{LeaseID: "cbx_default_renew"})
+		if err == nil || !strings.Contains(err.Error(), "renewal failed closed") {
+			t.Fatalf("prepare default err=%v, want renewal failure", err)
+		}
+	})
+
 	t.Run("release preparation preserves pre-release renewal failures", func(t *testing.T) {
 		remote := &blockedRenewWorkspaceOwnerRemote{
 			inner:        newFakeWorkspaceOwnerRemote(),
@@ -450,11 +474,11 @@ func TestWorkspaceOwnerSerializesStaticRunAndStandaloneActionsHydration(t *testi
 	if !shouldAcquireWorkspaceOwner(true, testStaticSSHBackend{}) {
 		t.Fatal("static SSH acquisition bypassed workspace ownership")
 	}
-	if !releaseLeasePreservesReachableTarget(testStaticSSHBackend{}) {
-		t.Fatal("static SSH release must preserve a reachable target for owner release")
+	if releaseLeaseNeedsOwnerGraceFence(testSSHBackend{}, LeaseTarget{LeaseID: "cbx_unclassified"}) {
+		t.Fatal("ordinary SSH lease backend unexpectedly requested release grace fence")
 	}
-	if releaseLeasePreservesReachableTarget(testSSHBackend{}) {
-		t.Fatal("ordinary SSH lease backend unexpectedly preserved reachable release target")
+	if !releaseLeaseNeedsOwnerGraceFence(destructiveGraceReleaseTestBackend{}, LeaseTarget{LeaseID: "cbx_destructive"}) {
+		t.Fatal("destructive release backend did not request release grace fence")
 	}
 	remote := newFakeWorkspaceOwnerRemote()
 	remote.blockBusyAcquire = true
@@ -512,12 +536,12 @@ func TestWorkspaceOwnerReachableRunCleanupReleasesRemoteOwner(t *testing.T) {
 	owner := acquireFakeWorkspaceOwner(t, context.Background(), remote, "cbx_static_cleanup")
 	backend := &reachableReleaseTestBackend{}
 
-	preservesTarget, err := prepareWorkspaceOwnerForLeaseRelease(context.Background(), owner, backend)
+	closeAfterOnly, err := prepareWorkspaceOwnerForLeaseRelease(context.Background(), owner, backend, LeaseTarget{LeaseID: "cbx_static_cleanup"})
 	if err != nil {
 		t.Fatalf("prepare reachable cleanup: %v", err)
 	}
-	if !preservesTarget {
-		t.Fatal("reachable release backend did not preserve target")
+	if closeAfterOnly {
+		t.Fatal("reachable release backend unexpectedly used release grace fence")
 	}
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_static_cleanup"}}); err != nil {
 		t.Fatalf("provider release: %v", err)
@@ -525,12 +549,40 @@ func TestWorkspaceOwnerReachableRunCleanupReleasesRemoteOwner(t *testing.T) {
 	if !backend.released.Load() {
 		t.Fatal("provider release was not exercised")
 	}
-	if err := closeWorkspaceOwnerAfterLeaseRelease(context.Background(), owner, preservesTarget); err != nil {
+	if err := closeWorkspaceOwnerAfterLeaseRelease(context.Background(), owner, closeAfterOnly); err != nil {
 		t.Fatalf("close reachable owner after release: %v", err)
 	}
 	next, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_static_cleanup", &bytes.Buffer{}, remote, 100*time.Millisecond, time.Second, 100*time.Millisecond)
 	if err != nil {
 		t.Fatalf("immediate reacquire after reachable cleanup failed: %v", err)
+	}
+	if err := next.Close(context.Background()); err != nil {
+		t.Fatalf("release reacquired owner: %v", err)
+	}
+}
+
+func TestWorkspaceOwnerUnclassifiedRunCleanupUsesLegacyRemoteClose(t *testing.T) {
+	remote := newFakeWorkspaceOwnerRemote()
+	owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_unclassified_cleanup", &bytes.Buffer{}, remote, time.Second, 80*time.Millisecond, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeAfterOnly, err := prepareWorkspaceOwnerForLeaseRelease(context.Background(), owner, testSSHBackend{}, LeaseTarget{LeaseID: "cbx_unclassified_cleanup"})
+	if err != nil {
+		t.Fatalf("prepare unclassified cleanup: %v", err)
+	}
+	if closeAfterOnly {
+		t.Fatal("unclassified backend unexpectedly used destructive release grace fence")
+	}
+	if err := (testSSHBackend{}).ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_unclassified_cleanup"}}); err != nil {
+		t.Fatalf("provider release: %v", err)
+	}
+	if err := closeWorkspaceOwnerAfterLeaseRelease(context.Background(), owner, closeAfterOnly); err != nil {
+		t.Fatalf("close unclassified owner after release: %v", err)
+	}
+	next, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_unclassified_cleanup", &bytes.Buffer{}, remote, 100*time.Millisecond, 80*time.Millisecond, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("unclassified cleanup did not release remote owner promptly: %v", err)
 	}
 	if err := next.Close(context.Background()); err != nil {
 		t.Fatalf("release reacquired owner: %v", err)
@@ -543,17 +595,17 @@ func TestWorkspaceOwnerDestructiveRunCleanupKeepsGraceFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	preservesTarget, err := prepareWorkspaceOwnerForLeaseRelease(context.Background(), owner, testSSHBackend{})
+	closeAfterOnly, err := prepareWorkspaceOwnerForLeaseRelease(context.Background(), owner, destructiveGraceReleaseTestBackend{}, LeaseTarget{LeaseID: "cbx_destructive_cleanup"})
 	if err != nil {
 		t.Fatalf("prepare destructive cleanup: %v", err)
 	}
-	if preservesTarget {
-		t.Fatal("destructive release backend unexpectedly preserved target")
+	if !closeAfterOnly {
+		t.Fatal("destructive release backend did not use release grace fence")
 	}
-	if err := (testSSHBackend{}).ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_destructive_cleanup"}}); err != nil {
+	if err := (destructiveGraceReleaseTestBackend{}).ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_destructive_cleanup"}}); err != nil {
 		t.Fatalf("provider release: %v", err)
 	}
-	if err := closeWorkspaceOwnerAfterLeaseRelease(context.Background(), owner, preservesTarget); err != nil {
+	if err := closeWorkspaceOwnerAfterLeaseRelease(context.Background(), owner, closeAfterOnly); err != nil {
 		t.Fatalf("close destructive owner after release: %v", err)
 	}
 	_, err = acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_destructive_cleanup", &bytes.Buffer{}, remote, 120*time.Millisecond, 60*time.Millisecond, 10*time.Millisecond)

@@ -252,11 +252,12 @@ type ReleaseLeaseConnectionCleanupPolicy interface {
 	ReleaseLeaseConnectionCleanupSafe() bool
 }
 
-// ReleaseLeaseReachabilityPolicy reports whether ReleaseLease preserves a
-// reachable target where remote workspace-owner state can and must be released
-// immediately after provider cleanup.
-type ReleaseLeaseReachabilityPolicy interface {
-	ReleaseLeasePreservesReachableTarget() bool
+// ReleaseLeaseOwnerGraceFencePolicy opts a destructive provider into replacing
+// the normal post-release remote workspace-owner Close with a pre-release
+// grace renewal. Use only when ReleaseLease makes the target unreachable or
+// deletes it, so post-release SSH cannot reliably release owner state.
+type ReleaseLeaseOwnerGraceFencePolicy interface {
+	ReleaseLeaseNeedsOwnerGraceFence(lease LeaseTarget) bool
 }
 
 // ReleaseLeaseTargetRefresher opts a provider into refreshing authorization

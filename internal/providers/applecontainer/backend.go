@@ -318,6 +318,10 @@ func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("released lease=%s container=%s", lease.LeaseID, blank(lease.Server.CloudID, lease.Server.Labels["container_id"]))
 }
 
+func (b *backend) ReleaseLeaseNeedsOwnerGraceFence(core.LeaseTarget) bool {
+	return true
+}
+
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	cfg := b.configForRun()
 	if err := requireMacOS(); err != nil {

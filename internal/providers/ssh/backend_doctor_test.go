@@ -26,17 +26,6 @@ func TestStaticSSHDoctorDoesNotReportProbeWhenUnchecked(t *testing.T) {
 	}
 }
 
-func TestStaticSSHReleasePreservesReachableTarget(t *testing.T) {
-	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stderr: io.Discard})
-	policy, ok := backend.(core.ReleaseLeaseReachabilityPolicy)
-	if !ok {
-		t.Fatal("static SSH backend must expose release reachability policy")
-	}
-	if !policy.ReleaseLeasePreservesReachableTarget() {
-		t.Fatal("static SSH release must preserve reachable target for workspace-owner release")
-	}
-}
-
 func TestStaticSSHRequestedSlugPersistsThroughClaimedResolveAndList(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

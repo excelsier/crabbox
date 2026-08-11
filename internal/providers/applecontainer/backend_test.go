@@ -740,6 +740,17 @@ func TestRequireExactAppleContainerClaim(t *testing.T) {
 	}
 }
 
+func TestAppleContainerReleaseNeedsOwnerGraceFence(t *testing.T) {
+	backend := testBackend(&recordingRunner{})
+	policy, ok := any(backend).(core.ReleaseLeaseOwnerGraceFencePolicy)
+	if !ok {
+		t.Fatal("apple-container backend does not expose release owner grace policy")
+	}
+	if !policy.ReleaseLeaseNeedsOwnerGraceFence(core.LeaseTarget{LeaseID: "cbx_apple"}) {
+		t.Fatal("apple-container release did not opt into destructive owner grace fence")
+	}
+}
+
 func TestResolveRawAppleContainerRequiresExplicitReclaimAndPersistsBinding(t *testing.T) {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		t.Skip("apple-container resolve only runs on macOS/Apple silicon")

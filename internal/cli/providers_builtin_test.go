@@ -1047,10 +1047,6 @@ type testStaticSSHBackend struct {
 	cfg Config
 }
 
-func (b testStaticSSHBackend) ReleaseLeasePreservesReachableTarget() bool {
-	return true
-}
-
 func (b testStaticSSHBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
 	server, target, leaseID, err := staticLease(b.cfg)
 	if err != nil {

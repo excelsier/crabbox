@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -371,6 +372,9 @@ func TestReleaseLeaseRetainsStoppedNamespaceClaimAndSSHFiles(t *testing.T) {
 	}
 	if lease.Server.Labels["release"] != "stop" || !backend.RetainLeaseClaimAfterRelease(lease) {
 		t.Fatalf("resolved lease=%#v", lease)
+	}
+	if _, ok := any(backend).(core.ReleaseLeaseOwnerGraceFencePolicy); ok {
+		t.Fatal("retained Namespace devbox release must preserve legacy owner close behavior")
 	}
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		t.Fatal(err)

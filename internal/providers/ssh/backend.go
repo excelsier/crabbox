@@ -152,10 +152,6 @@ func (b *staticLeaseBackend) ReleaseLease(_ context.Context, req ReleaseLeaseReq
 	return nil
 }
 
-func (b *staticLeaseBackend) ReleaseLeasePreservesReachableTarget() bool {
-	return true
-}
-
 func (b *staticLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	return fmt.Sprintf("released static lease=%s host=%s", lease.LeaseID, lease.SSH.Host)
 }

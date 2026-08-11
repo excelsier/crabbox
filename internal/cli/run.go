@@ -566,7 +566,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var workdir string
 	var hydratedByActions bool
 	var lifecycleOwner *workspaceOwner
-	var lifecycleOwnerReleasePreservesTarget bool
+	var lifecycleOwnerCloseAfterLeaseReleaseOnly bool
 	ownerParentCtx := ctx
 	defer func() {
 		if lifecycleOwner == nil {
@@ -574,7 +574,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if cleanup.Stopped {
 			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
-			closeErr := closeWorkspaceOwnerAfterLeaseRelease(releaseCtx, lifecycleOwner, lifecycleOwnerReleasePreservesTarget)
+			closeErr := closeWorkspaceOwnerAfterLeaseRelease(releaseCtx, lifecycleOwner, lifecycleOwnerCloseAfterLeaseReleaseOnly)
 			cancel()
 			if closeErr != nil {
 				runFailure = recordRunFailure(&runFailure, closeErr)
@@ -959,7 +959,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				return
 			}
 			releaseOwnerCtx, releaseOwnerCancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
-			lifecycleOwnerReleasePreservesTarget, ownerErr = prepareWorkspaceOwnerForLeaseRelease(releaseOwnerCtx, lifecycleOwner, sshBackend)
+			lifecycleOwnerCloseAfterLeaseReleaseOnly, ownerErr = prepareWorkspaceOwnerForLeaseRelease(releaseOwnerCtx, lifecycleOwner, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
 			releaseOwnerCancel()
 			if ownerErr != nil {
 				cleanup.Err = ownerErr
@@ -3223,29 +3223,34 @@ func releaseLeaseConnectionCleanupSafe(backend SSHLeaseBackend) bool {
 	return !ok || policy.ReleaseLeaseConnectionCleanupSafe()
 }
 
-func releaseLeasePreservesReachableTarget(backend SSHLeaseBackend) bool {
-	policy, ok := backend.(ReleaseLeaseReachabilityPolicy)
-	return ok && policy.ReleaseLeasePreservesReachableTarget()
+func releaseLeaseNeedsOwnerGraceFence(backend SSHLeaseBackend, lease LeaseTarget) bool {
+	policy, ok := backend.(ReleaseLeaseOwnerGraceFencePolicy)
+	return ok && policy.ReleaseLeaseNeedsOwnerGraceFence(lease)
 }
 
-func prepareWorkspaceOwnerForLeaseRelease(ctx context.Context, owner *workspaceOwner, backend SSHLeaseBackend) (bool, error) {
-	preservesTarget := releaseLeasePreservesReachableTarget(backend)
-	if owner == nil || preservesTarget {
-		return preservesTarget, nil
+func prepareWorkspaceOwnerForLeaseRelease(ctx context.Context, owner *workspaceOwner, backend SSHLeaseBackend, lease LeaseTarget) (bool, error) {
+	if owner == nil {
+		return false, nil
+	}
+	if err := owner.Err(); err != nil {
+		return false, err
+	}
+	if !releaseLeaseNeedsOwnerGraceFence(backend, lease) {
+		return false, nil
 	}
 	// Finish the synchronous grace renewal before the normal 45-second owner can
 	// expire; only then may destructive provider teardown begin.
-	return false, owner.PrepareLeaseRelease(ctx, workspaceOwnerReleaseGraceTTL)
+	return true, owner.PrepareLeaseRelease(ctx, workspaceOwnerReleaseGraceTTL)
 }
 
-func closeWorkspaceOwnerAfterLeaseRelease(ctx context.Context, owner *workspaceOwner, releasePreservesTarget bool) error {
+func closeWorkspaceOwnerAfterLeaseRelease(ctx context.Context, owner *workspaceOwner, closeAfterLeaseReleaseOnly bool) error {
 	if owner == nil {
 		return nil
 	}
-	if releasePreservesTarget {
-		return owner.Close(ctx)
+	if closeAfterLeaseReleaseOnly {
+		return owner.CloseAfterLeaseRelease()
 	}
-	return owner.CloseAfterLeaseRelease()
+	return owner.Close(ctx)
 }
 
 func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseIDs ...string) {

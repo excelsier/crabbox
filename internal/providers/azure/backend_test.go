@@ -430,6 +430,17 @@ func TestAzureReleaseRemovesStoredLeaseKey(t *testing.T) {
 	}
 }
 
+func TestAzureReleaseNeedsOwnerGraceFence(t *testing.T) {
+	backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard})
+	policy, ok := any(backend).(core.ReleaseLeaseOwnerGraceFencePolicy)
+	if !ok {
+		t.Fatal("azure backend does not expose release owner grace policy")
+	}
+	if !policy.ReleaseLeaseNeedsOwnerGraceFence(LeaseTarget{LeaseID: "cbx_azure"}) {
+		t.Fatal("azure release did not opt into destructive owner grace fence")
+	}
+}
+
 func TestAzureReleasePersistsCleanupBindingBeforeDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	server := azureTestServer("crabbox-owned", "cbx_123456abcdef", "owned")
