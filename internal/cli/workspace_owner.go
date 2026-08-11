@@ -315,14 +315,27 @@ func (o *workspaceOwner) Close(ctx context.Context) error {
 	return errors.Join(renewErr, releaseErr)
 }
 
-func (o *workspaceOwner) CloseAfterLeaseRelease() error {
+func (o *workspaceOwner) StopRenewalBeforeLeaseRelease() {
 	if o == nil {
-		return nil
+		return
 	}
+	// Quiesce renewal before the provider starts deleting the lease. That makes
+	// the boundary causal: every error recorded when this returns happened while
+	// the lease still existed, and teardown cannot kill an in-flight renewal.
 	o.closeOnce.Do(func() {
 		close(o.stop)
 		<-o.done
 	})
+}
+
+func (o *workspaceOwner) CloseAfterLeaseRelease() error {
+	if o == nil {
+		return nil
+	}
+	// Run cleanup quiesces renewal before releasing the lease. Preserve any
+	// failure recorded on that still-live lease; there can no longer be a
+	// teardown-caused renewal error to suppress here.
+	o.StopRenewalBeforeLeaseRelease()
 	return o.Err()
 }
 

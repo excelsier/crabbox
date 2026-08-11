@@ -28,6 +28,27 @@ type fakeWorkspaceOwnerRemote struct {
 	changed          chan struct{}
 }
 
+type blockedRenewWorkspaceOwnerRemote struct {
+	inner        *fakeWorkspaceOwnerRemote
+	renewStarted chan struct{}
+	releaseRenew chan struct{}
+	err          error
+	once         sync.Once
+}
+
+func (r *blockedRenewWorkspaceOwnerRemote) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+	if req.Action != workspaceOwnerRenew {
+		return r.inner.Do(ctx, req)
+	}
+	r.once.Do(func() { close(r.renewStarted) })
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-r.releaseRenew:
+		return "", r.err
+	}
+}
+
 func newFakeWorkspaceOwnerRemote() *fakeWorkspaceOwnerRemote {
 	return &fakeWorkspaceOwnerRemote{changed: make(chan struct{})}
 }
@@ -272,6 +293,46 @@ func TestWorkspaceOwnerTokenAndTransportFailuresFailClosed(t *testing.T) {
 		}
 		if err := owner.Close(context.Background()); err == nil || !strings.Contains(err.Error(), "renewal failed closed") {
 			t.Fatalf("close err=%v, want renewal failure", err)
+		}
+	})
+
+	t.Run("renewal is quiescent before lease release begins", func(t *testing.T) {
+		remote := &blockedRenewWorkspaceOwnerRemote{
+			inner:        newFakeWorkspaceOwnerRemote(),
+			renewStarted: make(chan struct{}),
+			releaseRenew: make(chan struct{}),
+			err:          errors.New("signal: killed"),
+		}
+		owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_released_renew", &bytes.Buffer{}, remote, time.Second, 500*time.Millisecond, 100*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-remote.renewStarted:
+		case <-time.After(time.Second):
+			t.Fatal("renewal call did not start")
+		}
+		done := make(chan error, 1)
+		go func() {
+			owner.StopRenewalBeforeLeaseRelease()
+			done <- owner.Err()
+		}()
+		select {
+		case err := <-done:
+			t.Fatalf("renewal stop returned before in-flight renewal: %v", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+		close(remote.releaseRenew)
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "renewal failed closed") {
+				t.Fatalf("pre-release stop err=%v, want renewal failure", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("pre-release stop waited after renewal returned")
+		}
+		if err := owner.CloseAfterLeaseRelease(); err == nil || !strings.Contains(err.Error(), "renewal failed closed") {
+			t.Fatalf("post-release close err=%v, want preserved pre-release renewal failure", err)
 		}
 	})
 

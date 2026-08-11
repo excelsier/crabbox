@@ -954,6 +954,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "lease cleanup skipped while workspace child remains possible: %v\n", ownerErr)
 				return
 			}
+			// No renewal may remain in flight when provider teardown begins. This
+			// preserves genuine failures on the live lease and prevents teardown
+			// from manufacturing a late signal-killed renewal failure.
+			lifecycleOwner.StopRenewalBeforeLeaseRelease()
 		}
 		releaseApp := a
 		if *timingJSON {
