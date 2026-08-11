@@ -566,16 +566,20 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var workdir string
 	var hydratedByActions bool
 	var lifecycleOwner *workspaceOwner
+	var lifecycleOwnerReleasePreservesTarget bool
 	ownerParentCtx := ctx
 	defer func() {
 		if lifecycleOwner == nil {
 			return
 		}
 		if cleanup.Stopped {
-			if closeErr := lifecycleOwner.CloseAfterLeaseRelease(); closeErr != nil {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
+			closeErr := closeWorkspaceOwnerAfterLeaseRelease(releaseCtx, lifecycleOwner, lifecycleOwnerReleasePreservesTarget)
+			cancel()
+			if closeErr != nil {
 				runFailure = recordRunFailure(&runFailure, closeErr)
 				err = errors.Join(err, closeErr)
-				fmt.Fprintf(a.Stderr, "warning: workspace owner stopped with released lease after renewal failure: %v\n", closeErr)
+				fmt.Fprintf(a.Stderr, "warning: workspace owner close after lease release failed: %v\n", closeErr)
 			}
 			return
 		}
@@ -954,10 +958,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "lease cleanup skipped while workspace child remains possible: %v\n", ownerErr)
 				return
 			}
-			// Finish the synchronous grace renewal before the normal 45-second
-			// owner can expire; only then may provider teardown begin.
 			releaseOwnerCtx, releaseOwnerCancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
-			ownerErr = lifecycleOwner.PrepareLeaseRelease(releaseOwnerCtx, workspaceOwnerReleaseGraceTTL)
+			lifecycleOwnerReleasePreservesTarget, ownerErr = prepareWorkspaceOwnerForLeaseRelease(releaseOwnerCtx, lifecycleOwner, sshBackend)
 			releaseOwnerCancel()
 			if ownerErr != nil {
 				cleanup.Err = ownerErr
@@ -3219,6 +3221,31 @@ func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLease
 func releaseLeaseConnectionCleanupSafe(backend SSHLeaseBackend) bool {
 	policy, ok := backend.(ReleaseLeaseConnectionCleanupPolicy)
 	return !ok || policy.ReleaseLeaseConnectionCleanupSafe()
+}
+
+func releaseLeasePreservesReachableTarget(backend SSHLeaseBackend) bool {
+	policy, ok := backend.(ReleaseLeaseReachabilityPolicy)
+	return ok && policy.ReleaseLeasePreservesReachableTarget()
+}
+
+func prepareWorkspaceOwnerForLeaseRelease(ctx context.Context, owner *workspaceOwner, backend SSHLeaseBackend) (bool, error) {
+	preservesTarget := releaseLeasePreservesReachableTarget(backend)
+	if owner == nil || preservesTarget {
+		return preservesTarget, nil
+	}
+	// Finish the synchronous grace renewal before the normal 45-second owner can
+	// expire; only then may destructive provider teardown begin.
+	return false, owner.PrepareLeaseRelease(ctx, workspaceOwnerReleaseGraceTTL)
+}
+
+func closeWorkspaceOwnerAfterLeaseRelease(ctx context.Context, owner *workspaceOwner, releasePreservesTarget bool) error {
+	if owner == nil {
+		return nil
+	}
+	if releasePreservesTarget {
+		return owner.Close(ctx)
+	}
+	return owner.CloseAfterLeaseRelease()
 }
 
 func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseIDs ...string) {

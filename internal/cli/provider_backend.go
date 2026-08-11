@@ -252,6 +252,13 @@ type ReleaseLeaseConnectionCleanupPolicy interface {
 	ReleaseLeaseConnectionCleanupSafe() bool
 }
 
+// ReleaseLeaseReachabilityPolicy reports whether ReleaseLease preserves a
+// reachable target where remote workspace-owner state can and must be released
+// immediately after provider cleanup.
+type ReleaseLeaseReachabilityPolicy interface {
+	ReleaseLeasePreservesReachableTarget() bool
+}
+
 // ReleaseLeaseTargetRefresher opts a provider into refreshing authorization
 // and connection metadata immediately before automatic lease cleanup.
 type ReleaseLeaseTargetRefresher interface {
