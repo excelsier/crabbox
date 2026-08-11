@@ -14,8 +14,10 @@ import (
 )
 
 const (
-	workspaceOwnerTTL             = 45 * time.Second
-	workspaceOwnerRenewInterval   = 10 * time.Second
+	workspaceOwnerTTL           = 45 * time.Second
+	workspaceOwnerRenewInterval = 10 * time.Second
+	// releaseCoordinatorLease can spend about 320 seconds across five timed
+	// attempts and backoff. Keep the fence valid beyond that whole retry window.
 	workspaceOwnerReleaseGraceTTL = 10 * time.Minute
 	workspaceOwnerWaitTimeout     = 2 * time.Minute
 	workspaceOwnerPollInterval    = time.Second

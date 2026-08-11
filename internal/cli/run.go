@@ -954,6 +954,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "lease cleanup skipped while workspace child remains possible: %v\n", ownerErr)
 				return
 			}
+			// Finish the synchronous grace renewal before the normal 45-second
+			// owner can expire; only then may provider teardown begin.
 			releaseOwnerCtx, releaseOwnerCancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
 			ownerErr = lifecycleOwner.PrepareLeaseRelease(releaseOwnerCtx, workspaceOwnerReleaseGraceTTL)
 			releaseOwnerCancel()
