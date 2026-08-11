@@ -49,6 +49,11 @@ func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget,
 	return nil
 }
 
+func (b *coordinatorLeaseBackend) ReleaseLeaseNeedsOwnerGraceFence(lease LeaseTarget) bool {
+	policy, ok := b.direct.(ReleaseLeaseOwnerGraceFencePolicy)
+	return ok && policy.ReleaseLeaseNeedsOwnerGraceFence(lease)
+}
+
 func (b *coordinatorLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		acquired, err := b.acquireOnceWithLeaseID(ctx, req.Keep, strings.TrimSpace(req.RequestedLeaseID), req.RequestedSlug)
