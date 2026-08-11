@@ -296,7 +296,7 @@ func TestWorkspaceOwnerTokenAndTransportFailuresFailClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("renewal is quiescent before lease release begins", func(t *testing.T) {
+	t.Run("release preparation preserves pre-release renewal failures", func(t *testing.T) {
 		remote := &blockedRenewWorkspaceOwnerRemote{
 			inner:        newFakeWorkspaceOwnerRemote(),
 			renewStarted: make(chan struct{}),
@@ -314,25 +314,58 @@ func TestWorkspaceOwnerTokenAndTransportFailuresFailClosed(t *testing.T) {
 		}
 		done := make(chan error, 1)
 		go func() {
-			owner.StopRenewalBeforeLeaseRelease()
-			done <- owner.Err()
+			done <- owner.PrepareLeaseRelease(context.Background(), time.Second)
 		}()
 		select {
 		case err := <-done:
-			t.Fatalf("renewal stop returned before in-flight renewal: %v", err)
+			t.Fatalf("release preparation returned before in-flight renewal: %v", err)
 		case <-time.After(20 * time.Millisecond):
 		}
 		close(remote.releaseRenew)
 		select {
 		case err := <-done:
 			if err == nil || !strings.Contains(err.Error(), "renewal failed closed") {
-				t.Fatalf("pre-release stop err=%v, want renewal failure", err)
+				t.Fatalf("release preparation err=%v, want preserved renewal failure", err)
 			}
 		case <-time.After(time.Second):
-			t.Fatal("pre-release stop waited after renewal returned")
+			t.Fatal("release preparation waited after renewal returned")
 		}
 		if err := owner.CloseAfterLeaseRelease(); err == nil || !strings.Contains(err.Error(), "renewal failed closed") {
 			t.Fatalf("post-release close err=%v, want preserved pre-release renewal failure", err)
+		}
+	})
+
+	t.Run("release-grace renewal blocks competing recovery past original ttl", func(t *testing.T) {
+		remote := newFakeWorkspaceOwnerRemote()
+		owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_release_retry", &bytes.Buffer{}, remote, time.Second, 60*time.Millisecond, 10*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := owner.PrepareLeaseRelease(context.Background(), 300*time.Millisecond); err != nil {
+			t.Fatalf("prepare release: %v", err)
+		}
+		time.Sleep(90 * time.Millisecond)
+		competing := make(chan error, 1)
+		go func() {
+			competitor, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_release_retry", &bytes.Buffer{}, remote, 120*time.Millisecond, 60*time.Millisecond, 10*time.Millisecond)
+			if err == nil {
+				_ = competitor.Close(context.Background())
+			}
+			competing <- err
+		}()
+		select {
+		case err := <-competing:
+			if err == nil {
+				t.Fatal("competing owner recovered workspace during release")
+			}
+			if !strings.Contains(err.Error(), "timed out") {
+				t.Fatalf("competing acquire err=%v, want timeout while release-grace owner is valid", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("competing acquire did not finish")
+		}
+		if err := owner.CloseAfterLeaseRelease(); err != nil {
+			t.Fatalf("close release owner: %v", err)
 		}
 	})
 

@@ -14,11 +14,12 @@ import (
 )
 
 const (
-	workspaceOwnerTTL           = 45 * time.Second
-	workspaceOwnerRenewInterval = 10 * time.Second
-	workspaceOwnerWaitTimeout   = 2 * time.Minute
-	workspaceOwnerPollInterval  = time.Second
-	workspaceOwnerProgressEvery = 10 * time.Second
+	workspaceOwnerTTL             = 45 * time.Second
+	workspaceOwnerRenewInterval   = 10 * time.Second
+	workspaceOwnerReleaseGraceTTL = 10 * time.Minute
+	workspaceOwnerWaitTimeout     = 2 * time.Minute
+	workspaceOwnerPollInterval    = time.Second
+	workspaceOwnerProgressEvery   = 10 * time.Second
 )
 
 type workspaceOwnerAction string
@@ -315,27 +316,34 @@ func (o *workspaceOwner) Close(ctx context.Context) error {
 	return errors.Join(renewErr, releaseErr)
 }
 
-func (o *workspaceOwner) StopRenewalBeforeLeaseRelease() {
+func (o *workspaceOwner) PrepareLeaseRelease(ctx context.Context, graceTTL time.Duration) error {
 	if o == nil {
-		return
+		return nil
 	}
-	// Quiesce renewal before the provider starts deleting the lease. That makes
-	// the boundary causal: every error recorded when this returns happened while
-	// the lease still existed, and teardown cannot kill an in-flight renewal.
 	o.closeOnce.Do(func() {
 		close(o.stop)
 		<-o.done
 	})
+	if err := o.Err(); err != nil {
+		return err
+	}
+	if graceTTL < o.ttl {
+		graceTTL = o.ttl
+	}
+	response, err := o.transport.Do(ctx, workspaceOwnerRemoteRequest{Action: workspaceOwnerRenew, Key: o.key, Token: o.token, TTL: graceTTL})
+	if err != nil {
+		return exit(7, "extend remote workspace owner for lease release: ambiguous remote state: %v", err)
+	}
+	if response != "RENEWED" {
+		return exit(7, "extend remote workspace owner for lease release failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
+	}
+	return nil
 }
 
 func (o *workspaceOwner) CloseAfterLeaseRelease() error {
 	if o == nil {
 		return nil
 	}
-	// Run cleanup quiesces renewal before releasing the lease. Preserve any
-	// failure recorded on that still-live lease; there can no longer be a
-	// teardown-caused renewal error to suppress here.
-	o.StopRenewalBeforeLeaseRelease()
 	return o.Err()
 }
 
