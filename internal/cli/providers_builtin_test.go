@@ -774,7 +774,7 @@ func (testFirecrackerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testFirecrackerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	mode := ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	mode := ReleaseLeaseOwnerCleanupShortFence
 	if cfg.Firecracker.DeleteOnRelease {
 		mode = ReleaseLeaseOwnerCleanupGraceFence
 	}
@@ -835,7 +835,7 @@ func (testIncusProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) e
 	return nil
 }
 func (p testIncusProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	mode := ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	mode := ReleaseLeaseOwnerCleanupShortFence
 	if cfg.Incus.DeleteOnRelease {
 		mode = ReleaseLeaseOwnerCleanupGraceFence
 	}
@@ -1179,7 +1179,7 @@ func (p testVastProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	mode := ReleaseLeaseOwnerCleanupGraceFence
 	switch strings.ToLower(strings.TrimSpace(cfg.Vast.ReleaseAction)) {
 	case "keep", "stop":
-		mode = ReleaseLeaseOwnerCleanupBeforeProviderRelease
+		mode = ReleaseLeaseOwnerCleanupShortFence
 	}
 	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: mode}, nil
 }
@@ -1207,7 +1207,7 @@ func (testNvidiaBrevProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 func (p testNvidiaBrevProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	mode := ReleaseLeaseOwnerCleanupGraceFence
 	if strings.EqualFold(strings.TrimSpace(cfg.NvidiaBrev.ReleaseAction), "stop") {
-		mode = ReleaseLeaseOwnerCleanupBeforeProviderRelease
+		mode = ReleaseLeaseOwnerCleanupShortFence
 	}
 	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: mode}, nil
 }
@@ -1307,7 +1307,7 @@ func (testNamespaceProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values an
 	return nil
 }
 func (p testNamespaceProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	mode := ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	mode := ReleaseLeaseOwnerCleanupShortFence
 	if cfg.Namespace.DeleteOnRelease {
 		mode = ReleaseLeaseOwnerCleanupGraceFence
 	}
@@ -1394,7 +1394,7 @@ func (testMorphProvider) ServerTypeForConfig(cfg Config) string {
 func (testMorphProvider) ServerTypeForClass(string) string { return "snapshot" }
 
 func (p testMorphProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	mode := ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	mode := ReleaseLeaseOwnerCleanupShortFence
 	if cfg.Morph.DeleteOnRelease {
 		mode = ReleaseLeaseOwnerCleanupGraceFence
 	}

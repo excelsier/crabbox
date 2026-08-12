@@ -376,8 +376,8 @@ func TestReleaseLeaseRetainsStoppedNamespaceClaimAndSSHFiles(t *testing.T) {
 	if _, ok := any(backend).(core.ReleaseLeaseOwnerGraceFencePolicy); ok {
 		t.Fatal("retained Namespace devbox release must preserve legacy owner close behavior")
 	}
-	if got := backend.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupBeforeProviderRelease {
-		t.Fatalf("retained cleanup mode=%s, want before provider release", got)
+	if got := backend.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("retained cleanup mode=%s, want short fence", got)
 	}
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		t.Fatal(err)

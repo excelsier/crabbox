@@ -4,6 +4,8 @@ import (
 	"flag"
 	"path"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type coderFlagValues struct {
@@ -68,6 +70,7 @@ func ApplyCoderProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "coder-delete-on-release") {
 		cfg.Coder.DeleteOnRelease = *v.DeleteOnRelease
+		core.MarkDeleteOnReleaseExplicit(cfg, coderProvider)
 	}
 	if flagWasSet(fs, "coder-wait") {
 		cfg.Coder.Wait = *v.Wait

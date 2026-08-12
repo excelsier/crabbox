@@ -583,7 +583,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 			return
 		}
-		if lifecycleOwnerCleanupMode == ReleaseLeaseOwnerCleanupBeforeProviderRelease {
+		if lifecycleOwnerCleanupMode == ReleaseLeaseOwnerCleanupShortFence {
 			return
 		}
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
@@ -3229,7 +3229,7 @@ func releaseLeaseConnectionCleanupSafe(backend SSHLeaseBackend) bool {
 func releaseLeaseOwnerCleanupMode(backend SSHLeaseBackend, lease LeaseTarget) ReleaseLeaseOwnerCleanupMode {
 	if policy, ok := backend.(ReleaseLeaseOwnerCleanupPolicy); ok {
 		switch mode := policy.ReleaseLeaseOwnerCleanupMode(lease); mode {
-		case ReleaseLeaseOwnerCleanupAfterProviderRelease, ReleaseLeaseOwnerCleanupBeforeProviderRelease, ReleaseLeaseOwnerCleanupGraceFence:
+		case ReleaseLeaseOwnerCleanupAfterProviderRelease, ReleaseLeaseOwnerCleanupShortFence, ReleaseLeaseOwnerCleanupGraceFence:
 			return mode
 		}
 	}
@@ -3252,8 +3252,11 @@ func prepareWorkspaceOwnerForLeaseRelease(ctx context.Context, owner *workspaceO
 	}
 	mode := releaseLeaseOwnerCleanupMode(backend, lease)
 	switch mode {
-	case ReleaseLeaseOwnerCleanupBeforeProviderRelease:
-		return mode, owner.Close(ctx)
+	case ReleaseLeaseOwnerCleanupShortFence:
+		// Retained stop/pause release needs ownership to survive provider teardown,
+		// but only for this owner's normal TTL. A zero duration normalizes to
+		// owner.ttl inside PrepareLeaseRelease.
+		return mode, owner.PrepareLeaseRelease(ctx, 0)
 	case ReleaseLeaseOwnerCleanupGraceFence:
 		// Finish the synchronous grace renewal before the normal 45-second owner can
 		// expire; only then may destructive provider teardown begin.
@@ -3268,8 +3271,8 @@ func closeWorkspaceOwnerAfterLeaseRelease(ctx context.Context, owner *workspaceO
 		return nil
 	}
 	switch mode {
-	case ReleaseLeaseOwnerCleanupBeforeProviderRelease:
-		return nil
+	case ReleaseLeaseOwnerCleanupShortFence:
+		return owner.CloseAfterLeaseRelease()
 	case ReleaseLeaseOwnerCleanupGraceFence:
 		return owner.CloseAfterLeaseRelease()
 	default:

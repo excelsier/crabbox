@@ -135,7 +135,7 @@ func TestReleaseLeaseOwnerCleanupModeUsesRealDirectProviderPolicy(t *testing.T) 
 			lease: core.LeaseTarget{Server: core.Server{Labels: map[string]string{
 				"release_action": "stop",
 			}}},
-			want: core.ReleaseLeaseOwnerCleanupBeforeProviderRelease,
+			want: core.ReleaseLeaseOwnerCleanupShortFence,
 		},
 		{
 			name:     "vast destructive destroy uses grace fence",

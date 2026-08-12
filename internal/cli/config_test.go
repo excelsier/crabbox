@@ -1135,6 +1135,7 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 		SealosDevbox: &fileSealosDevboxConfig{DeleteOnRelease: &value},
 		AgentSandbox: &fileAgentSandboxConfig{DeleteOnRelease: &value},
 		Namespace:    &fileNamespaceConfig{DeleteOnRelease: &value},
+		Coder:        &fileCoderConfig{DeleteOnRelease: &value},
 		Morph:        &fileMorphConfig{DeleteOnRelease: &value},
 		NvidiaBrev: &fileNvidiaBrevConfig{
 			ReleaseAction: "stop",
@@ -1142,7 +1143,7 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"incus", "kubevirt", "sealos-devbox", "agent-sandbox", "namespace-devbox", "morph", "nvidia-brev"} {
+	for _, provider := range []string{"incus", "kubevirt", "sealos-devbox", "agent-sandbox", "namespace-devbox", "coder", "morph", "nvidia-brev"} {
 		if !DeleteOnReleaseExplicit(cfg, provider) {
 			t.Fatalf("file release policy not explicit for %s", provider)
 		}
@@ -1159,6 +1160,7 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 		"CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE",
 		"CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE",
 		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
+		"CRABBOX_CODER_DELETE_ON_RELEASE",
 		"CRABBOX_MORPH_DELETE_ON_RELEASE",
 	} {
 		t.Setenv(key, "false")
@@ -1167,7 +1169,7 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	if err := applyEnv(&envCfg); err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"incus", "kubevirt", "sealos-devbox", "agent-sandbox", "namespace-devbox", "morph", "nvidia-brev"} {
+	for _, provider := range []string{"incus", "kubevirt", "sealos-devbox", "agent-sandbox", "namespace-devbox", "coder", "morph", "nvidia-brev"} {
 		if !DeleteOnReleaseExplicit(envCfg, provider) {
 			t.Fatalf("environment release policy not explicit for %s", provider)
 		}

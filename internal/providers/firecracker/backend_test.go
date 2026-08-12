@@ -94,8 +94,8 @@ func TestFirecrackerReleaseLeaseOwnerCleanupModeUsesRetainedStatePolicy(t *testi
 	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
 	fcBackend := &backend{cfg: cfg}
 	lease := LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}
-	if got := fcBackend.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupBeforeProviderRelease {
-		t.Fatalf("stop cleanup mode=%s, want before provider release", got)
+	if got := fcBackend.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("stop cleanup mode=%s, want short fence", got)
 	}
 
 	cfg.Firecracker.DeleteOnRelease = true

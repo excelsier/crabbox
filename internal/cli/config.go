@@ -6421,6 +6421,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		if file.Coder.DeleteOnRelease != nil {
 			cfg.Coder.DeleteOnRelease = *file.Coder.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "coder")
 		}
 		if file.Coder.Wait != "" {
 			cfg.Coder.Wait = file.Coder.Wait
@@ -8842,6 +8843,7 @@ func applyEnv(cfg *Config) error {
 	cfg.Coder.WorkRoot = getenv("CRABBOX_CODER_WORK_ROOT", cfg.Coder.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_CODER_DELETE_ON_RELEASE"); ok {
 		cfg.Coder.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "coder")
 	}
 	cfg.Coder.Wait = getenv("CRABBOX_CODER_WAIT", cfg.Coder.Wait)
 	if value, ok := getenvBool("CRABBOX_CODER_USE_PARAMETER_DEFAULTS"); ok {

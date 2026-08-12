@@ -258,25 +258,26 @@ const (
 	// ReleaseLeaseOwnerCleanupAfterProviderRelease keeps the historical default:
 	// provider release runs first, then the reachable target receives RELEASE.
 	ReleaseLeaseOwnerCleanupAfterProviderRelease ReleaseLeaseOwnerCleanupMode = "after-provider-release"
-	// ReleaseLeaseOwnerCleanupBeforeProviderRelease releases owner state while a
-	// retained target is still reachable, before stop/pause/keep teardown.
-	ReleaseLeaseOwnerCleanupBeforeProviderRelease ReleaseLeaseOwnerCleanupMode = "before-provider-release"
+	// ReleaseLeaseOwnerCleanupShortFence stops normal renewal and performs one
+	// bounded renewal before retained stop/pause/keep teardown. It preserves
+	// serialization while the target becomes unreachable, then naturally expires.
+	ReleaseLeaseOwnerCleanupShortFence ReleaseLeaseOwnerCleanupMode = "short-fence"
 	// ReleaseLeaseOwnerCleanupGraceFence replaces the normal RELEASE with a
 	// pre-release long renewal for destructive releases where the target becomes
 	// unreachable and coordinator/provider cleanup may retry.
 	ReleaseLeaseOwnerCleanupGraceFence ReleaseLeaseOwnerCleanupMode = "grace-fence"
 )
 
-// ReleaseLeaseOwnerCleanupPolicy lets providers choose when run cleanup should
-// release the remote workspace-owner marker relative to provider ReleaseLease.
+// ReleaseLeaseOwnerCleanupPolicy lets providers choose how run cleanup fences
+// the remote workspace-owner marker relative to provider ReleaseLease.
 type ReleaseLeaseOwnerCleanupPolicy interface {
 	ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) ReleaseLeaseOwnerCleanupMode
 }
 
 // ReleaseLeaseOwnerGraceFencePolicy is kept as a compatibility shim for older
 // destructive providers. New providers should implement
-// ReleaseLeaseOwnerCleanupPolicy so retained stop/pause paths can release owner
-// state before the target becomes unreachable.
+// ReleaseLeaseOwnerCleanupPolicy so retained stop/pause paths can use a short
+// fence while the target becomes unreachable.
 type ReleaseLeaseOwnerGraceFencePolicy interface {
 	ReleaseLeaseNeedsOwnerGraceFence(lease LeaseTarget) bool
 }
@@ -310,17 +311,17 @@ func ReleaseLeaseOwnerCleanupModeForConfig(provider string, cfg Config, lease Le
 	case "vast":
 		switch releaseActionFromLease(cfg.Vast.ReleaseAction, DeleteOnReleaseExplicit(cfg, "vast"), lease) {
 		case "keep", "stop":
-			return ReleaseLeaseOwnerCleanupBeforeProviderRelease
+			return ReleaseLeaseOwnerCleanupShortFence
 		default:
 			return ReleaseLeaseOwnerCleanupGraceFence
 		}
 	case "nvidia-brev":
 		if releaseActionFromLease(cfg.NvidiaBrev.ReleaseAction, DeleteOnReleaseExplicit(cfg, "nvidia-brev"), lease) == "stop" {
-			return ReleaseLeaseOwnerCleanupBeforeProviderRelease
+			return ReleaseLeaseOwnerCleanupShortFence
 		}
 		return ReleaseLeaseOwnerCleanupGraceFence
 	case "hostinger":
-		return ReleaseLeaseOwnerCleanupBeforeProviderRelease
+		return ReleaseLeaseOwnerCleanupShortFence
 	default:
 		return ReleaseLeaseOwnerCleanupGraceFence
 	}
@@ -330,7 +331,7 @@ func deleteOnReleaseOwnerCleanupMode(deleteOnRelease bool) ReleaseLeaseOwnerClea
 	if deleteOnRelease {
 		return ReleaseLeaseOwnerCleanupGraceFence
 	}
-	return ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	return ReleaseLeaseOwnerCleanupShortFence
 }
 
 func deleteOnReleaseFromLease(configured bool, explicit bool, lease LeaseTarget) bool {

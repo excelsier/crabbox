@@ -1624,8 +1624,8 @@ func TestNvidiaBrevRetainLeaseClaimAfterReleaseUsesStoredPolicy(t *testing.T) {
 	if !backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}) {
 		t.Fatal("stored stop policy did not retain claim")
 	}
-	if got := backend.ReleaseLeaseOwnerCleanupMode(LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}); got != core.ReleaseLeaseOwnerCleanupBeforeProviderRelease {
-		t.Fatalf("stored stop cleanup mode=%s, want before provider release", got)
+	if got := backend.ReleaseLeaseOwnerCleanupMode(LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}); got != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("stored stop cleanup mode=%s, want short fence", got)
 	}
 	if backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"release": "delete"}}}) {
 		t.Fatal("stored delete policy retained claim")

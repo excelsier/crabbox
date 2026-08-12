@@ -54,6 +54,9 @@ func TestCoderFlagsApplyWithoutSecrets(t *testing.T) {
 	if cfg.Coder.Template != "go-dev" || cfg.Coder.Preset != "large" || len(cfg.Coder.Parameters) != 2 || !cfg.Coder.DeleteOnRelease {
 		t.Fatalf("flags not applied: %#v", cfg.Coder)
 	}
+	if !core.DeleteOnReleaseExplicit(cfg, coderProvider) {
+		t.Fatal("coder delete-on-release flag was not marked explicit")
+	}
 	fs.VisitAll(func(f *flag.Flag) {
 		if strings.Contains(f.Name, "token") || strings.Contains(f.Name, "session") {
 			t.Fatalf("coder provider must not expose token/session flags: %s", f.Name)
@@ -75,8 +78,8 @@ func TestCoderReleaseLeaseOwnerCleanupModeUsesRetainedStopPolicy(t *testing.T) {
 		t.Fatal("coder backend does not expose release owner cleanup policy")
 	}
 	lease := LeaseTarget{Server: Server{Labels: map[string]string{coderReleaseActionLabel: coderReleaseActionStop}}}
-	if got := policy.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupBeforeProviderRelease {
-		t.Fatalf("stop cleanup mode=%s, want before provider release", got)
+	if got := policy.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("stop cleanup mode=%s, want short fence", got)
 	}
 
 	cfg.Coder.DeleteOnRelease = true
@@ -90,6 +93,34 @@ func TestCoderReleaseLeaseOwnerCleanupModeUsesRetainedStopPolicy(t *testing.T) {
 	lease = LeaseTarget{Server: Server{Labels: map[string]string{coderReleaseActionLabel: coderReleaseActionDelete}}}
 	if got := policy.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupGraceFence {
 		t.Fatalf("delete cleanup mode=%s, want grace fence", got)
+	}
+}
+
+func TestCoderReleaseLeaseOwnerCleanupModeHonorsPersistedStopUnlessCurrentConfigExplicit(t *testing.T) {
+	runner := &fakeRunner{}
+	cfg := Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: true}}
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := backend.(interface {
+		ReleaseLeaseOwnerCleanupMode(LeaseTarget) core.ReleaseLeaseOwnerCleanupMode
+	})
+	lease := LeaseTarget{Server: Server{Labels: map[string]string{coderReleaseActionLabel: coderReleaseActionStop}}}
+	if got := policy.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("non-explicit current delete config overrode persisted stop label: mode=%s", got)
+	}
+
+	core.MarkDeleteOnReleaseExplicit(&cfg, coderProvider)
+	backend, err = NewCoderLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy = backend.(interface {
+		ReleaseLeaseOwnerCleanupMode(LeaseTarget) core.ReleaseLeaseOwnerCleanupMode
+	})
+	if got := policy.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("explicit current delete config did not override persisted stop label: mode=%s", got)
 	}
 }
 
