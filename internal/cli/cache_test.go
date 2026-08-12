@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -15,6 +16,16 @@ func TestParseCacheStats(t *testing.T) {
 	}
 	if entries[1].Kind != "docker" || entries[1].Note == "" {
 		t.Fatalf("docker entry=%#v", entries[1])
+	}
+}
+
+func TestCacheStatsJSONEmptyResultIsArray(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := writeCacheStatsJSON(&stdout, parseCacheStats("")); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "[]\n" {
+		t.Fatalf("cache stats JSON=%q, want empty array", got)
 	}
 }
 

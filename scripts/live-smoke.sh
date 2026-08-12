@@ -270,7 +270,19 @@ provider_smoke() (
   run_in_repo "$cb" status --provider "$provider" --id "$slug" --wait --wait-timeout 90s
   run_in_repo "$cb" inspect --provider "$provider" --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
   run_in_repo "$cb" ssh --provider "$provider" --id "$slug"
-  run_in_repo "$cb" cache stats --id "$slug" --json | jq 'if type=="array" then {items:length,kinds:[.[].kind]} else {keys:keys} end'
+  # Older or external Crabbox binaries may still encode an empty cache list as
+  # JSON null. Accept that compatible shape while rejecting any other scalar.
+  run_in_repo "$cb" cache stats --id "$slug" --json | jq '
+    if type == "null" then
+      {items: 0, kinds: []}
+    elif type == "array" then
+      {items: length, kinds: [.[].kind]}
+    elif type == "object" then
+      {keys: keys}
+    else
+      error("cache stats must be null, an array, or an object")
+    end
+  '
 
   local runout
   # shellcheck disable=SC2016 # expanded by the remote shell.

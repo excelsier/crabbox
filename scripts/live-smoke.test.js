@@ -1962,7 +1962,7 @@ case "$1" in
     exit 0
     ;;
   cache)
-    printf '[]\\n'
+    printf '%s\\n' "\${CRABBOX_FAKE_CACHE_STATS:-[]}"
     ;;
   run)
     printf 'crabbox-live-ok\\n'
@@ -1984,29 +1984,47 @@ esac
 `,
   );
 
-  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-      CRABBOX_BIN: fakeCrabbox,
-      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
-      CRABBOX_FAKE_LOG: crabboxLog,
-      CRABBOX_LIVE: "1",
-      CRABBOX_LIVE_COORDINATOR: "0",
-      CRABBOX_LIVE_PROVIDERS: "apple-container",
-      CRABBOX_LIVE_REPO: repoRoot,
-    },
-    encoding: "utf8",
-  });
+  const smoke = (cacheStats) => {
+    fs.writeFileSync(crabboxLog, "", "utf8");
+    const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        CRABBOX_BIN: fakeCrabbox,
+        CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+        CRABBOX_FAKE_CACHE_STATS: cacheStats,
+        CRABBOX_FAKE_LOG: crabboxLog,
+        CRABBOX_LIVE: "1",
+        CRABBOX_LIVE_COORDINATOR: "0",
+        CRABBOX_LIVE_PROVIDERS: "apple-container",
+        CRABBOX_LIVE_REPO: repoRoot,
+      },
+      encoding: "utf8",
+    });
+    return { result, calls: fs.readFileSync(crabboxLog, "utf8") };
+  };
 
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /crabbox-live-ok/);
-  const calls = fs.readFileSync(crabboxLog, "utf8");
-  assert.match(calls, /^warmup --provider apple-container --ttl 15m --idle-timeout 5m$/m);
-  for (const command of ["status", "inspect", "ssh", "cache", "run", "stop"]) {
-    assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
+  for (const [cacheStats, expected] of [
+    ["null", /"items": 0,[\s\S]*"kinds": \[\]/],
+    [JSON.stringify([{ kind: "bun" }]), /"items": 1,[\s\S]*"kinds": \[\s*"bun"\s*\]/],
+    [JSON.stringify({ entries: 0 }), /"keys": \[\s*"entries"\s*\]/],
+  ]) {
+    const { result, calls } = smoke(cacheStats);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, expected);
+    assert.match(result.stdout, /crabbox-live-ok/);
+    assert.match(calls, /^run --provider apple-container --id apple-container-smoke-test /m);
+    assert.equal((calls.match(/^stop --provider apple-container apple-container-smoke-test$/gm) ?? []).length, 1);
   }
+
+  const { result: malformed, calls } = smoke(JSON.stringify("not-a-cache-report"));
+  assert.notEqual(malformed.status, 0, malformed.stdout + malformed.stderr);
+  assert.match(malformed.stderr, /cache stats must be null, an array, or an object/);
+  assert.match(calls, /^warmup --provider apple-container --ttl 15m --idle-timeout 5m$/m);
+  assert.match(calls, /^cache stats --id apple-container-smoke-test --json$/m);
+  assert.doesNotMatch(calls, /^run --provider apple-container /m);
+  assert.equal((calls.match(/^stop --provider apple-container apple-container-smoke-test$/gm) ?? []).length, 1);
   assert.doesNotMatch(calls, /^history(?: |$)/m);
 });
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -66,7 +67,7 @@ func (a App) cacheStats(ctx context.Context, args []string) error {
 	}
 	entries := parseCacheStats(out)
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(entries)
+		return writeCacheStatsJSON(a.Stdout, entries)
 	}
 	for _, entry := range entries {
 		if entry.Note != "" {
@@ -76,6 +77,15 @@ func (a App) cacheStats(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "%-8s %-32s %s\n", entry.Kind, formatBytes(entry.Bytes), entry.Path)
 	}
 	return nil
+}
+
+// writeCacheStatsJSON preserves the public CLI contract that an empty cache
+// inventory is a JSON array, never null.
+func writeCacheStatsJSON(out io.Writer, entries []cacheEntry) error {
+	if entries == nil {
+		entries = []cacheEntry{}
+	}
+	return json.NewEncoder(out).Encode(entries)
 }
 
 func (a App) cachePurge(ctx context.Context, args []string) error {
