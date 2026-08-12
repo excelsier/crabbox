@@ -49,8 +49,12 @@ func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget,
 	return nil
 }
 
+func (b *coordinatorLeaseBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) ReleaseLeaseOwnerCleanupMode {
+	return ReleaseLeaseOwnerCleanupGraceFence
+}
+
 func (b *coordinatorLeaseBackend) ReleaseLeaseNeedsOwnerGraceFence(lease LeaseTarget) bool {
-	return true
+	return b.ReleaseLeaseOwnerCleanupMode(lease) == ReleaseLeaseOwnerCleanupGraceFence
 }
 
 func (b *coordinatorLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {

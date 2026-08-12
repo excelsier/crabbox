@@ -502,6 +502,10 @@ func (b *leaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("released external lease=%s name=%s", lease.LeaseID, lease.Server.Name)
 }
 
+func (b *leaseBackend) ReleaseLeaseOwnerCleanupMode(core.LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupAfterProviderRelease
+}
+
 func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	response, err := b.invoke(ctx, protocolRequest{
 		Operation: "touch",

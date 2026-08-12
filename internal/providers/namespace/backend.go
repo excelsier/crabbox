@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"gopkg.in/yaml.v3"
 )
 
@@ -277,6 +278,10 @@ func (b *namespaceLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 
 func (b *namespaceLeaseBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
 	return !namespaceDeleteOnRelease(lease, b.namespaceConfigForRun())
+}
+
+func (b *namespaceLeaseBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(namespaceProvider, b.namespaceConfigForRun(), lease)
 }
 
 func (b *namespaceLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {

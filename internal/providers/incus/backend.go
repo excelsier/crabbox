@@ -493,6 +493,10 @@ func (b *backend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
 	return !incusDeleteOnRelease(lease, b.configForRun())
 }
 
+func (b *backend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.configForRun(), lease)
+}
+
 func incusReleaseAction(cfg Config) string {
 	if cfg.Incus.DeleteOnRelease {
 		return "delete"

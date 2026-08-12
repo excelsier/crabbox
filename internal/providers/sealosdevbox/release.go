@@ -116,6 +116,10 @@ func (b *backend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
 	return !b.deleteOnRelease(lease)
 }
 
+func (b *backend) ReleaseLeaseOwnerCleanupMode(lease core.LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.cfg, lease)
+}
+
 func (b *backend) deleteOnRelease(lease core.LeaseTarget) bool {
 	if core.DeleteOnReleaseExplicit(b.cfg, providerName) {
 		return b.cfg.SealosDevbox.DeleteOnRelease

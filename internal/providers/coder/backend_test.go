@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type fakeRunner struct {
@@ -57,6 +59,38 @@ func TestCoderFlagsApplyWithoutSecrets(t *testing.T) {
 			t.Fatalf("coder provider must not expose token/session flags: %s", f.Name)
 		}
 	})
+}
+
+func TestCoderReleaseLeaseOwnerCleanupModeUsesRetainedStopPolicy(t *testing.T) {
+	runner := &fakeRunner{}
+	cfg := Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: false}}
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, ok := backend.(interface {
+		ReleaseLeaseOwnerCleanupMode(LeaseTarget) core.ReleaseLeaseOwnerCleanupMode
+	})
+	if !ok {
+		t.Fatal("coder backend does not expose release owner cleanup policy")
+	}
+	lease := LeaseTarget{Server: Server{Labels: map[string]string{coderReleaseActionLabel: coderReleaseActionStop}}}
+	if got := policy.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupBeforeProviderRelease {
+		t.Fatalf("stop cleanup mode=%s, want before provider release", got)
+	}
+
+	cfg.Coder.DeleteOnRelease = true
+	backend, err = NewCoderLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy = backend.(interface {
+		ReleaseLeaseOwnerCleanupMode(LeaseTarget) core.ReleaseLeaseOwnerCleanupMode
+	})
+	lease = LeaseTarget{Server: Server{Labels: map[string]string{coderReleaseActionLabel: coderReleaseActionDelete}}}
+	if got := policy.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("delete cleanup mode=%s, want grace fence", got)
+	}
 }
 
 func TestCoderCreateCommandUsesTemplateParametersAndNoTokenArgv(t *testing.T) {

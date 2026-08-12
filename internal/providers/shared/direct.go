@@ -19,6 +19,10 @@ type DirectSSHBackend struct {
 
 func (b *DirectSSHBackend) Spec() core.ProviderSpec { return b.SpecValue }
 
+func (b *DirectSSHBackend) ReleaseLeaseOwnerCleanupMode(lease core.LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(b.SpecValue.Name, b.Cfg, lease)
+}
+
 func (b *DirectSSHBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
 	if b.StoredLeaseKeys {
 		core.UseStoredTestboxKey(&target.SSH, leaseID)

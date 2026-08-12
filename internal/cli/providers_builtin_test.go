@@ -123,7 +123,7 @@ func (testExternalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any
 	return nil
 }
 func (p testExternalProvider) Configure(cfg Config, _ Runtime) (Backend, error) {
-	return testExternalSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec()}, cfg: cfg}, nil
+	return testExternalSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec(), ownerCleanupMode: ReleaseLeaseOwnerCleanupAfterProviderRelease}, cfg: cfg}, nil
 }
 func (testExternalProvider) ControllerProviderScope(cfg Config) (string, error) {
 	return "test-external:" + strings.TrimSpace(cfg.External.Command), nil
@@ -222,7 +222,7 @@ func (testAzureProvider) ServerTypeForClass(class string) string {
 	return azureVMSizeCandidatesForClass(class)[0]
 }
 func (p testAzureProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: ReleaseLeaseOwnerCleanupGraceFence}, nil
 }
 func (testAzureProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
 	if req.Config.Coordinator == "" || req.Server.CloudID == "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != targetLinux {
@@ -398,7 +398,7 @@ func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: ReleaseLeaseOwnerCleanupGraceFence}, nil
 }
 func (p testHetznerProvider) ConfigureDoctor(Config, Runtime) (DoctorBackend, error) {
 	if _, err := newHetznerClient(); err != nil {
@@ -593,7 +593,7 @@ func (testGCPProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testGCPProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: ReleaseLeaseOwnerCleanupGraceFence}, nil
 }
 func (testGCPProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
 	if req.Config.Coordinator == "" || req.Server.CloudID == "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != targetLinux {
@@ -651,7 +651,7 @@ func (p testAWSProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	if testAWSBackendOverride != nil {
 		return testAWSBackendOverride, nil
 	}
-	return testSSHBackend{spec: p.Spec()}, nil
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: ReleaseLeaseOwnerCleanupGraceFence}, nil
 }
 func (testAWSProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
 	if req.Server.CloudID == "" {
@@ -774,7 +774,11 @@ func (testFirecrackerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testFirecrackerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	mode := ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	if cfg.Firecracker.DeleteOnRelease {
+		mode = ReleaseLeaseOwnerCleanupGraceFence
+	}
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: mode}, nil
 }
 
 func (testIncusProvider) Name() string      { return "incus" }
@@ -831,7 +835,11 @@ func (testIncusProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) e
 	return nil
 }
 func (p testIncusProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	mode := ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	if cfg.Incus.DeleteOnRelease {
+		mode = ReleaseLeaseOwnerCleanupGraceFence
+	}
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: mode}, nil
 }
 
 type testIncusFlagValues struct {
@@ -1039,12 +1047,16 @@ func (testStaticSSHProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testStaticSSHProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testStaticSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec()}, cfg: cfg}, nil
+	return testStaticSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec(), ownerCleanupMode: ReleaseLeaseOwnerCleanupAfterProviderRelease}, cfg: cfg}, nil
 }
 
 type testStaticSSHBackend struct {
 	testSSHBackend
 	cfg Config
+}
+
+func (b testStaticSSHBackend) ReleaseLeaseOwnerCleanupMode(LeaseTarget) ReleaseLeaseOwnerCleanupMode {
+	return ReleaseLeaseOwnerCleanupAfterProviderRelease
 }
 
 func (b testStaticSSHBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
@@ -1163,8 +1175,13 @@ func (testVastProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	}
 	return nil
 }
-func (p testVastProvider) Configure(Config, Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+func (p testVastProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	mode := ReleaseLeaseOwnerCleanupGraceFence
+	switch strings.ToLower(strings.TrimSpace(cfg.Vast.ReleaseAction)) {
+	case "keep", "stop":
+		mode = ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	}
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: mode}, nil
 }
 
 type testNvidiaBrevProvider struct{}
@@ -1187,8 +1204,12 @@ func (testNvidiaBrevProvider) RegisterFlags(*flag.FlagSet, Config) any { return 
 func (testNvidiaBrevProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
-func (p testNvidiaBrevProvider) Configure(Config, Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+func (p testNvidiaBrevProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	mode := ReleaseLeaseOwnerCleanupGraceFence
+	if strings.EqualFold(strings.TrimSpace(cfg.NvidiaBrev.ReleaseAction), "stop") {
+		mode = ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	}
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: mode}, nil
 }
 
 type testBlacksmithProvider struct{}
@@ -1286,7 +1307,11 @@ func (testNamespaceProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values an
 	return nil
 }
 func (p testNamespaceProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	mode := ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	if cfg.Namespace.DeleteOnRelease {
+		mode = ReleaseLeaseOwnerCleanupGraceFence
+	}
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: mode}, nil
 }
 
 type testNamespaceFlagValues struct {
@@ -1369,7 +1394,11 @@ func (testMorphProvider) ServerTypeForConfig(cfg Config) string {
 func (testMorphProvider) ServerTypeForClass(string) string { return "snapshot" }
 
 func (p testMorphProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	mode := ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	if cfg.Morph.DeleteOnRelease {
+		mode = ReleaseLeaseOwnerCleanupGraceFence
+	}
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: mode}, nil
 }
 
 func (testDaytonaProvider) Name() string      { return "daytona" }
@@ -1422,7 +1451,7 @@ func (testDaytonaProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any)
 	return nil
 }
 func (p testDaytonaProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testDaytonaBackend{testSSHBackend: testSSHBackend{spec: p.Spec()}}, nil
+	return testDaytonaBackend{testSSHBackend: testSSHBackend{spec: p.Spec(), ownerCleanupMode: ReleaseLeaseOwnerCleanupGraceFence}}, nil
 }
 
 type testIsloProvider struct{}
@@ -1964,7 +1993,7 @@ func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, valu
 	return nil
 }
 func (p testLocalContainerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: ReleaseLeaseOwnerCleanupGraceFence}, nil
 }
 func (testLocalContainerProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
 	if req.Server.CloudID == "" || req.StrategyExplicit {
@@ -2068,7 +2097,7 @@ func (testAppleVMProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any)
 	return nil
 }
 func (p testAppleVMProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	return testSSHBackend{spec: p.Spec(), ownerCleanupMode: ReleaseLeaseOwnerCleanupGraceFence}, nil
 }
 
 type testMultipassProvider struct{}
@@ -2532,10 +2561,14 @@ func (b testDaytonaBackend) Stop(context.Context, StopRequest) error {
 }
 
 type testSSHBackend struct {
-	spec ProviderSpec
+	spec             ProviderSpec
+	ownerCleanupMode ReleaseLeaseOwnerCleanupMode
 }
 
 func (b testSSHBackend) Spec() ProviderSpec { return b.spec }
+func (b testSSHBackend) ReleaseLeaseOwnerCleanupMode(LeaseTarget) ReleaseLeaseOwnerCleanupMode {
+	return b.ownerCleanupMode
+}
 func (b testSSHBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
 	return LeaseTarget{}, nil
 }

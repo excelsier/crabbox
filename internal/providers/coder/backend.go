@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const (
@@ -362,6 +364,10 @@ func (b *coderLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 		action = "deleted"
 	}
 	return fmt.Sprintf("%s coder workspace lease=%s workspace=%s", action, lease.LeaseID, lease.Server.Name)
+}
+
+func (b *coderLeaseBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(coderProvider, b.cfg, lease)
 }
 
 func (b *coderLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {

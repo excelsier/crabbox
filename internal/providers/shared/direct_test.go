@@ -110,6 +110,57 @@ func TestCleanupServersRequiresDeleteAndPropagatesDeleteErrors(t *testing.T) {
 	}
 }
 
+func TestReleaseLeaseOwnerCleanupModeUsesRealDirectProviderPolicy(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		cfg      core.Config
+		lease    core.LeaseTarget
+		want     core.ReleaseLeaseOwnerCleanupMode
+	}{
+		{
+			name:     "aws destructive direct release uses grace fence",
+			provider: "aws",
+			want:     core.ReleaseLeaseOwnerCleanupGraceFence,
+		},
+		{
+			name:     "ssh static target remains reachable after release",
+			provider: "ssh",
+			want:     core.ReleaseLeaseOwnerCleanupAfterProviderRelease,
+		},
+		{
+			name:     "vast retained stop releases owner before provider stop",
+			provider: "vast",
+			cfg:      core.Config{Vast: core.VastConfig{ReleaseAction: "destroy"}},
+			lease: core.LeaseTarget{Server: core.Server{Labels: map[string]string{
+				"release_action": "stop",
+			}}},
+			want: core.ReleaseLeaseOwnerCleanupBeforeProviderRelease,
+		},
+		{
+			name:     "vast destructive destroy uses grace fence",
+			provider: "vast",
+			cfg:      core.Config{Vast: core.VastConfig{ReleaseAction: "destroy"}},
+			lease: core.LeaseTarget{Server: core.Server{Labels: map[string]string{
+				"release_action": "destroy",
+			}}},
+			want: core.ReleaseLeaseOwnerCleanupGraceFence,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &DirectSSHBackend{
+				SpecValue: core.ProviderSpec{Name: tc.provider},
+				Cfg:       tc.cfg,
+			}
+			if got := backend.ReleaseLeaseOwnerCleanupMode(tc.lease); got != tc.want {
+				t.Fatalf("ReleaseLeaseOwnerCleanupMode=%s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCleanupServersSkipsIneligibleAndContinues(t *testing.T) {
 	clock := &testCleanupClock{now: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
 	var stderr bytes.Buffer

@@ -252,12 +252,117 @@ type ReleaseLeaseConnectionCleanupPolicy interface {
 	ReleaseLeaseConnectionCleanupSafe() bool
 }
 
-// ReleaseLeaseOwnerGraceFencePolicy opts a destructive provider into replacing
-// the normal post-release remote workspace-owner Close with a pre-release
-// grace renewal. Use only when ReleaseLease makes the target unreachable or
-// deletes it, so post-release SSH cannot reliably release owner state.
+type ReleaseLeaseOwnerCleanupMode string
+
+const (
+	// ReleaseLeaseOwnerCleanupAfterProviderRelease keeps the historical default:
+	// provider release runs first, then the reachable target receives RELEASE.
+	ReleaseLeaseOwnerCleanupAfterProviderRelease ReleaseLeaseOwnerCleanupMode = "after-provider-release"
+	// ReleaseLeaseOwnerCleanupBeforeProviderRelease releases owner state while a
+	// retained target is still reachable, before stop/pause/keep teardown.
+	ReleaseLeaseOwnerCleanupBeforeProviderRelease ReleaseLeaseOwnerCleanupMode = "before-provider-release"
+	// ReleaseLeaseOwnerCleanupGraceFence replaces the normal RELEASE with a
+	// pre-release long renewal for destructive releases where the target becomes
+	// unreachable and coordinator/provider cleanup may retry.
+	ReleaseLeaseOwnerCleanupGraceFence ReleaseLeaseOwnerCleanupMode = "grace-fence"
+)
+
+// ReleaseLeaseOwnerCleanupPolicy lets providers choose when run cleanup should
+// release the remote workspace-owner marker relative to provider ReleaseLease.
+type ReleaseLeaseOwnerCleanupPolicy interface {
+	ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) ReleaseLeaseOwnerCleanupMode
+}
+
+// ReleaseLeaseOwnerGraceFencePolicy is kept as a compatibility shim for older
+// destructive providers. New providers should implement
+// ReleaseLeaseOwnerCleanupPolicy so retained stop/pause paths can release owner
+// state before the target becomes unreachable.
 type ReleaseLeaseOwnerGraceFencePolicy interface {
 	ReleaseLeaseNeedsOwnerGraceFence(lease LeaseTarget) bool
+}
+
+func ReleaseLeaseOwnerCleanupModeForConfig(provider string, cfg Config, lease LeaseTarget) ReleaseLeaseOwnerCleanupMode {
+	provider = normalizeProviderName(provider)
+	if provider == "" {
+		provider = normalizeProviderName(cfg.Provider)
+	}
+	switch provider {
+	case "ssh", "external":
+		return ReleaseLeaseOwnerCleanupAfterProviderRelease
+	case "namespace-devbox", "namespace":
+		return deleteOnReleaseOwnerCleanupMode(deleteOnReleaseFromLease(cfg.Namespace.DeleteOnRelease, DeleteOnReleaseExplicit(cfg, "namespace-devbox"), lease))
+	case "morph":
+		return deleteOnReleaseOwnerCleanupMode(deleteOnReleaseFromLease(cfg.Morph.DeleteOnRelease, DeleteOnReleaseExplicit(cfg, "morph"), lease))
+	case "incus":
+		return deleteOnReleaseOwnerCleanupMode(deleteOnReleaseFromLease(cfg.Incus.DeleteOnRelease, DeleteOnReleaseExplicit(cfg, "incus"), lease))
+	case "kubevirt":
+		return deleteOnReleaseOwnerCleanupMode(deleteOnReleaseFromLease(cfg.KubeVirt.DeleteOnRelease, DeleteOnReleaseExplicit(cfg, "kubevirt"), lease))
+	case "sealos-devbox":
+		return deleteOnReleaseOwnerCleanupMode(deleteOnReleaseFromLease(cfg.SealosDevbox.DeleteOnRelease, DeleteOnReleaseExplicit(cfg, "sealos-devbox"), lease))
+	case "github-codespaces":
+		return deleteOnReleaseOwnerCleanupMode(deleteOnReleaseFromLease(cfg.GitHubCodespaces.DeleteOnRelease, DeleteOnReleaseExplicit(cfg, "github-codespaces"), lease))
+	case "coder":
+		return deleteOnReleaseOwnerCleanupMode(deleteOnReleaseFromLease(cfg.Coder.DeleteOnRelease, DeleteOnReleaseExplicit(cfg, "coder"), lease))
+	case "firecracker":
+		return deleteOnReleaseOwnerCleanupMode(deleteOnReleaseFromLease(cfg.Firecracker.DeleteOnRelease, DeleteOnReleaseExplicit(cfg, "firecracker"), lease))
+	case "agent-sandbox":
+		return deleteOnReleaseOwnerCleanupMode(deleteOnReleaseFromLease(cfg.AgentSandbox.DeleteOnRelease, DeleteOnReleaseExplicit(cfg, "agent-sandbox"), lease))
+	case "vast":
+		switch releaseActionFromLease(cfg.Vast.ReleaseAction, DeleteOnReleaseExplicit(cfg, "vast"), lease) {
+		case "keep", "stop":
+			return ReleaseLeaseOwnerCleanupBeforeProviderRelease
+		default:
+			return ReleaseLeaseOwnerCleanupGraceFence
+		}
+	case "nvidia-brev":
+		if releaseActionFromLease(cfg.NvidiaBrev.ReleaseAction, DeleteOnReleaseExplicit(cfg, "nvidia-brev"), lease) == "stop" {
+			return ReleaseLeaseOwnerCleanupBeforeProviderRelease
+		}
+		return ReleaseLeaseOwnerCleanupGraceFence
+	case "hostinger":
+		return ReleaseLeaseOwnerCleanupBeforeProviderRelease
+	default:
+		return ReleaseLeaseOwnerCleanupGraceFence
+	}
+}
+
+func deleteOnReleaseOwnerCleanupMode(deleteOnRelease bool) ReleaseLeaseOwnerCleanupMode {
+	if deleteOnRelease {
+		return ReleaseLeaseOwnerCleanupGraceFence
+	}
+	return ReleaseLeaseOwnerCleanupBeforeProviderRelease
+}
+
+func deleteOnReleaseFromLease(configured bool, explicit bool, lease LeaseTarget) bool {
+	if explicit {
+		return configured
+	}
+	switch releaseActionLabel(lease) {
+	case "stop", "keep", "pause", "false":
+		return false
+	case "delete", "destroy", "true":
+		return true
+	default:
+		return configured
+	}
+}
+
+func releaseActionFromLease(configured string, explicit bool, lease LeaseTarget) string {
+	if explicit {
+		return strings.ToLower(strings.TrimSpace(configured))
+	}
+	return strings.ToLower(strings.TrimSpace(firstNonBlank(releaseActionLabel(lease), configured)))
+}
+
+func releaseActionLabel(lease LeaseTarget) string {
+	if lease.Server.Labels == nil {
+		return ""
+	}
+	return firstNonBlank(
+		lease.Server.Labels["release"],
+		lease.Server.Labels["release_action"],
+		lease.Server.Labels["coder_release_action"],
+	)
 }
 
 // ReleaseLeaseTargetRefresher opts a provider into refreshing authorization

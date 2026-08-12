@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const (
@@ -286,6 +288,10 @@ func (b *nvidiaBrevBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool
 		}
 	}
 	return true
+}
+
+func (b *nvidiaBrevBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.cfg, lease)
 }
 
 func (b *nvidiaBrevBackend) ReleaseLeaseMessage(lease LeaseTarget) string {

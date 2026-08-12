@@ -232,6 +232,10 @@ func (b *leaseBackend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool
 	return !kubeVirtDeleteOnRelease(lease, b.cfg)
 }
 
+func (b *leaseBackend) ReleaseLeaseOwnerCleanupMode(lease core.LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.cfg, lease)
+}
+
 func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
 	if server.Labels == nil {

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestNvidiaBrevProviderSpec(t *testing.T) {
@@ -1622,8 +1624,14 @@ func TestNvidiaBrevRetainLeaseClaimAfterReleaseUsesStoredPolicy(t *testing.T) {
 	if !backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}) {
 		t.Fatal("stored stop policy did not retain claim")
 	}
+	if got := backend.ReleaseLeaseOwnerCleanupMode(LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}); got != core.ReleaseLeaseOwnerCleanupBeforeProviderRelease {
+		t.Fatalf("stored stop cleanup mode=%s, want before provider release", got)
+	}
 	if backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"release": "delete"}}}) {
 		t.Fatal("stored delete policy retained claim")
+	}
+	if got := backend.ReleaseLeaseOwnerCleanupMode(LeaseTarget{Server: Server{Labels: map[string]string{"release": "delete"}}}); got != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("stored delete cleanup mode=%s, want grace fence", got)
 	}
 	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "delete"}}
 	markReleaseActionExplicit(&cfg)

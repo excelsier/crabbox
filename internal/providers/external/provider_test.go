@@ -115,6 +115,13 @@ func TestConfigureAcceptsMacOSTarget(t *testing.T) {
 	}
 }
 
+func TestExternalReleaseLeaseOwnerCleanupModeClosesAfterProviderRelease(t *testing.T) {
+	backend := &leaseBackend{}
+	if got := backend.ReleaseLeaseOwnerCleanupMode(core.LeaseTarget{}); got != core.ReleaseLeaseOwnerCleanupAfterProviderRelease {
+		t.Fatalf("cleanup mode=%s, want after provider release", got)
+	}
+}
+
 func TestConfigureAcceptsNativeWindowsWorkRoot(t *testing.T) {
 	cfg := testConfig()
 	cfg.TargetOS = core.TargetWindows

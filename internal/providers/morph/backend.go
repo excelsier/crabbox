@@ -450,6 +450,10 @@ func (b *morphLeaseBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool
 	return !morphDeleteOnRelease(lease, b.configForRun())
 }
 
+func (b *morphLeaseBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.configForRun(), lease)
+}
+
 func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 	cfg := b.configForRun()
 	if req.IdleTimeout > 0 {

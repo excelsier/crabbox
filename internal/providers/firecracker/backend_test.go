@@ -89,6 +89,24 @@ func TestApplyFlagsUpdatesFirecrackerConfig(t *testing.T) {
 	}
 }
 
+func TestFirecrackerReleaseLeaseOwnerCleanupModeUsesRetainedStatePolicy(t *testing.T) {
+	cfg := Config{Firecracker: core.FirecrackerConfig{DeleteOnRelease: false}}
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
+	fcBackend := &backend{cfg: cfg}
+	lease := LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}
+	if got := fcBackend.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupBeforeProviderRelease {
+		t.Fatalf("stop cleanup mode=%s, want before provider release", got)
+	}
+
+	cfg.Firecracker.DeleteOnRelease = true
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
+	fcBackend = &backend{cfg: cfg}
+	lease = LeaseTarget{Server: Server{Labels: map[string]string{"release": "delete"}}}
+	if got := fcBackend.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("delete cleanup mode=%s, want grace fence", got)
+	}
+}
+
 func TestValidateConfigRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name    string

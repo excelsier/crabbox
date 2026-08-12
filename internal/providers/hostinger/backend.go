@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type leaseBackend struct {
@@ -573,6 +575,10 @@ func (b *leaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 
 func (b *leaseBackend) RetainLeaseClaimAfterRelease(LeaseTarget) bool {
 	return true
+}
+
+func (b *leaseBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.configForRun(), lease)
 }
 
 func validateHostingerReleaseAction(cfg Config) error {

@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type codespacesAPI interface {
@@ -764,6 +766,10 @@ func (b *backend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
 		return false
 	}
 	return !githubCodespacesDeleteOnRelease(lease, b.cfg)
+}
+
+func (b *backend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.cfg, lease)
 }
 
 func githubCodespacesClaimRelease(leaseID string) string {

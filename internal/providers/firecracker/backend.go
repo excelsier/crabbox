@@ -409,6 +409,10 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	return nil
 }
 
+func (b *backend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.configForRun(), lease)
+}
+
 func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	cfg := b.configForRun()
 	records, err := b.listStateRecords()
