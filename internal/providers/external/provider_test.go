@@ -115,10 +115,10 @@ func TestConfigureAcceptsMacOSTarget(t *testing.T) {
 	}
 }
 
-func TestExternalReleaseLeaseOwnerCleanupModeClosesAfterProviderRelease(t *testing.T) {
+func TestExternalReleaseLeaseOwnerCleanupModeDefaultsToGraceFence(t *testing.T) {
 	backend := &leaseBackend{}
-	if got := backend.ReleaseLeaseOwnerCleanupMode(core.LeaseTarget{}); got != core.ReleaseLeaseOwnerCleanupAfterProviderRelease {
-		t.Fatalf("cleanup mode=%s, want after provider release", got)
+	if got := backend.ReleaseLeaseOwnerCleanupMode(core.LeaseTarget{}); got != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("cleanup mode=%s, want grace fence", got)
 	}
 }
 
@@ -1103,7 +1103,7 @@ func TestFixedLeaseIDCapabilityFlag(t *testing.T) {
 	cfg := testConfig()
 	fs := flag.NewFlagSet("external", flag.ContinueOnError)
 	values := registerFlags(fs, cfg)
-	if err := fs.Parse([]string{"--external-idempotent-lease-id=true"}); err != nil {
+	if err := fs.Parse([]string{"--external-idempotent-lease-id=true", "--external-release-owner-cleanup=after-provider-release"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := applyFlags(&cfg, fs, values); err != nil {
@@ -1111,6 +1111,47 @@ func TestFixedLeaseIDCapabilityFlag(t *testing.T) {
 	}
 	if !cfg.External.Capabilities.IdempotentLeaseID {
 		t.Fatal("fixed lease ID capability flag was ignored")
+	}
+	if cfg.External.Capabilities.ReleaseOwnerCleanup != "after-provider-release" {
+		t.Fatalf("release owner cleanup capability flag=%q", cfg.External.Capabilities.ReleaseOwnerCleanup)
+	}
+}
+
+func TestExternalReleaseOwnerCleanupModeRequiresExplicitCapability(t *testing.T) {
+	cfg := testConfig()
+	backend := &leaseBackend{cfg: cfg}
+	if got := backend.ReleaseLeaseOwnerCleanupMode(core.LeaseTarget{}); got != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("default mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupGraceFence)
+	}
+
+	cfg.External.Capabilities.ReleaseOwnerCleanup = "after-provider-release"
+	backend.cfg = cfg
+	if got := backend.ReleaseLeaseOwnerCleanupMode(core.LeaseTarget{}); got != core.ReleaseLeaseOwnerCleanupAfterProviderRelease {
+		t.Fatalf("after mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupAfterProviderRelease)
+	}
+
+	cfg.External.Capabilities.ReleaseOwnerCleanup = "short-fence"
+	backend.cfg = cfg
+	if got := backend.ReleaseLeaseOwnerCleanupMode(core.LeaseTarget{}); got != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("short mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupShortFence)
+	}
+}
+
+func TestExternalReleaseOwnerCleanupCapabilityValidationAndScope(t *testing.T) {
+	cfg := testConfig()
+	cfg.External.Capabilities.ReleaseOwnerCleanup = "unsafe-after"
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "releaseOwnerCleanup") {
+		t.Fatalf("invalid release owner cleanup err=%v", err)
+	}
+
+	cfg.External.Capabilities.ReleaseOwnerCleanup = "short-fence"
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("valid release owner cleanup err=%v", err)
+	}
+	withoutCapability := cfg
+	withoutCapability.External.Capabilities.ReleaseOwnerCleanup = ""
+	if externalClaimScope(cfg) == externalClaimScope(withoutCapability) {
+		t.Fatal("external claim scope did not bind release owner cleanup capability")
 	}
 }
 

@@ -503,7 +503,14 @@ func (b *leaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 }
 
 func (b *leaseBackend) ReleaseLeaseOwnerCleanupMode(core.LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
-	return core.ReleaseLeaseOwnerCleanupAfterProviderRelease
+	switch normalizeReleaseOwnerCleanup(b.cfg.External.Capabilities.ReleaseOwnerCleanup) {
+	case "after-provider-release":
+		return core.ReleaseLeaseOwnerCleanupAfterProviderRelease
+	case "short-fence":
+		return core.ReleaseLeaseOwnerCleanupShortFence
+	default:
+		return core.ReleaseLeaseOwnerCleanupGraceFence
+	}
 }
 
 func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
@@ -724,7 +731,7 @@ func externalControllerScope(cfg core.Config) (string, error) {
 		WindowsMode:  windowsMode,
 		Architecture: architecture,
 	}
-	if cfg.External.Capabilities.IdempotentLeaseID {
+	if cfg.External.Capabilities.IdempotentLeaseID || normalizeReleaseOwnerCleanup(cfg.External.Capabilities.ReleaseOwnerCleanup) != "" {
 		capabilities := cfg.External.Capabilities
 		scope.Capabilities = &capabilities
 	}

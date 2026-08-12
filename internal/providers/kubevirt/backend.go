@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type leaseBackend struct {
@@ -233,7 +234,7 @@ func (b *leaseBackend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool
 }
 
 func (b *leaseBackend) ReleaseLeaseOwnerCleanupMode(lease core.LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
-	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.cfg, lease)
+	return shared.DeleteOnReleaseOwnerCleanupMode(kubeVirtDeleteOnRelease(lease, b.cfg))
 }
 
 func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {

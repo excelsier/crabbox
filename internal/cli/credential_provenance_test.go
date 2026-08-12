@@ -2259,6 +2259,41 @@ func TestConfigMergeTracksSSHDestinationSources(t *testing.T) {
 		}
 	})
 
+	t.Run("repository cannot self-enable external release owner cleanup downgrade", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		trusted := fileExternalConfig{
+			Command: "approved-provider",
+			Capabilities: &ExternalCapabilitiesConfig{
+				ReleaseOwnerCleanup: "short-fence",
+			},
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &trusted}, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateExternalReleaseOwnerCleanup(cfg); err != nil {
+			t.Fatalf("trusted release owner cleanup contract rejected: %v", err)
+		}
+
+		cfg = baseConfig()
+		cfg.Provider = "external"
+		trusted = fileExternalConfig{Command: "approved-provider"}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &trusted}, true); err != nil {
+			t.Fatal(err)
+		}
+		repository := fileExternalConfig{
+			Capabilities: &ExternalCapabilitiesConfig{
+				ReleaseOwnerCleanup: "after-provider-release",
+			},
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &repository}, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateExternalReleaseOwnerCleanup(cfg); err == nil || !strings.Contains(err.Error(), "external.capabilities.releaseOwnerCleanup") {
+			t.Fatalf("repository release owner cleanup downgrade error=%v", err)
+		}
+	})
+
 	t.Run("trusted external provider output rejects unencodable contract", func(t *testing.T) {
 		cfg := baseConfig()
 		cfg.Provider = "external"

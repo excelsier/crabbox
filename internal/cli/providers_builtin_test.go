@@ -123,7 +123,14 @@ func (testExternalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any
 	return nil
 }
 func (p testExternalProvider) Configure(cfg Config, _ Runtime) (Backend, error) {
-	return testExternalSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec(), ownerCleanupMode: ReleaseLeaseOwnerCleanupAfterProviderRelease}, cfg: cfg}, nil
+	mode := ReleaseLeaseOwnerCleanupGraceFence
+	switch strings.ToLower(strings.TrimSpace(cfg.External.Capabilities.ReleaseOwnerCleanup)) {
+	case "after-provider-release":
+		mode = ReleaseLeaseOwnerCleanupAfterProviderRelease
+	case "short-fence":
+		mode = ReleaseLeaseOwnerCleanupShortFence
+	}
+	return testExternalSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec(), ownerCleanupMode: mode}, cfg: cfg}, nil
 }
 func (testExternalProvider) ControllerProviderScope(cfg Config) (string, error) {
 	return "test-external:" + strings.TrimSpace(cfg.External.Command), nil

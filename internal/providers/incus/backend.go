@@ -12,6 +12,7 @@ import (
 
 	"github.com/lxc/incus/v7/shared/api"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type ProviderSpec = core.ProviderSpec
@@ -494,7 +495,7 @@ func (b *backend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
 }
 
 func (b *backend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
-	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.configForRun(), lease)
+	return shared.DeleteOnReleaseOwnerCleanupMode(incusDeleteOnRelease(lease, b.configForRun()))
 }
 
 func incusReleaseAction(cfg Config) string {

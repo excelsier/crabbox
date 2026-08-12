@@ -91,6 +91,7 @@ type credentialDestinationProvenance struct {
 	sshKey                credentialValueSource
 	exeDevControlHost     credentialValueSource
 	externalConfig        credentialValueSource
+	externalCapabilities  credentialValueSource
 	externalLifecycle     credentialValueSource
 	externalConnection    credentialValueSource
 	externalResource      credentialValueSource
@@ -669,6 +670,21 @@ func ValidateExternalProviderSSHOutput(cfg Config) error {
 	return nil
 }
 
+// ValidateExternalReleaseOwnerCleanup requires a trusted or operator-explicit
+// source before an external adapter may weaken the default destructive cleanup
+// fence. Repository config cannot self-declare that release leaves SSH
+// reachable or only needs a short retained-target fence.
+func ValidateExternalReleaseOwnerCleanup(cfg Config) error {
+	mode := strings.ToLower(strings.TrimSpace(cfg.External.Capabilities.ReleaseOwnerCleanup))
+	if mode == "" || mode == "grace-fence" {
+		return nil
+	}
+	if cfg.credentialProvenance.externalCapabilities == credentialSourceRepository {
+		return repositoryCredentialDestinationError("external", "external.capabilities.releaseOwnerCleanup", "the same adapter cleanup contract in trusted user config, an environment variable, or a flag")
+	}
+	return nil
+}
+
 func externalTemplateCredentialSource(value string, source, resourceSource, configSource credentialValueSource) credentialValueSource {
 	if strings.Contains(value, "{{repo.") {
 		return credentialSourceRepository
@@ -803,6 +819,7 @@ func MarkExternalRoutingCredentialSources(cfg *Config) {
 	connection := cfg.External.Connection
 	provenance := &cfg.credentialProvenance
 	provenance.externalConfig = source
+	provenance.externalCapabilities = source
 	provenance.externalLifecycle = source
 	provenance.externalConnection = source
 	provenance.externalResource = credentialDestinationSource(connection.ResourceName, provenance.externalApproved.resource, source)
@@ -885,6 +902,14 @@ func MarkExternalRoutingFileExplicit(cfg *Config) {
 // adapter contract through a trusted flag.
 func MarkExternalProviderOutputFlagExplicit(cfg *Config) {
 	markExternalProviderOutputExplicit(cfg, credentialSourceFlag)
+}
+
+// MarkExternalCapabilitiesExplicit records that an operator selected the
+// external adapter capability contract through a trusted flag.
+func MarkExternalCapabilitiesExplicit(cfg *Config) {
+	if cfg != nil {
+		cfg.credentialProvenance.externalCapabilities = credentialSourceFlag
+	}
 }
 
 // MarkExternalDesktopPasswordEnvExplicit records an operator-selected desktop

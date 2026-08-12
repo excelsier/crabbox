@@ -410,7 +410,8 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 }
 
 func (b *backend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
-	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.configForRun(), lease)
+	cfg := b.configForRun()
+	return shared.DeleteOnReleaseOwnerCleanupMode(shared.DeleteOnReleaseFromLease(cfg.Firecracker.DeleteOnRelease, core.DeleteOnReleaseExplicit(cfg, providerName), lease))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {

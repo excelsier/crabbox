@@ -671,6 +671,32 @@ func TestReleaseHonorsExplicitReleaseActionOverride(t *testing.T) {
 	}
 }
 
+func TestReleaseLeaseOwnerCleanupModeHonorsVastReleaseAction(t *testing.T) {
+	b := newTestBackend(t, &fakeVastAPI{})
+	b.cfg.Vast.ReleaseAction = "destroy"
+	lease := core.LeaseTarget{Server: core.Server{Labels: map[string]string{vastReleaseActionLabel: "stop"}}}
+	if got := b.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("persisted stop mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupShortFence)
+	}
+
+	lease.Server.Labels[vastReleaseActionLabel] = "keep"
+	if got := b.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("persisted keep mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupShortFence)
+	}
+
+	lease.Server.Labels[vastReleaseActionLabel] = "destroy"
+	if got := b.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("persisted destroy mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupGraceFence)
+	}
+
+	b.cfg.Vast.ReleaseAction = "stop"
+	core.MarkDeleteOnReleaseExplicit(&b.cfg, providerName)
+	lease.Server.Labels[vastReleaseActionLabel] = "destroy"
+	if got := b.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("explicit stop mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupShortFence)
+	}
+}
+
 func TestReleaseStopIsExplicitAndTested(t *testing.T) {
 	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
 	b := newTestBackend(t, api)

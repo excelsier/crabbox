@@ -24,6 +24,7 @@ external:
     - /absolute/path/provider.mjs
   capabilities:
     idempotentLeaseId: true
+    releaseOwnerCleanup: grace-fence
   config:
     backend: vm
     namespace: team-devboxes
@@ -130,6 +131,16 @@ fixed `desired.leaseId`, `desired.slug`, and `desired.name` always return that
 same resource. `adapter serve` rejects external adapters without this
 opt-in before any lifecycle side effect. Declarative adapters must also use
 the command-attested identity contract described below.
+
+`external.capabilities.releaseOwnerCleanup` is also opt-in. Leave it unset, or
+set `grace-fence`, when `release` may delete, stop, or otherwise make the
+target unreachable before Crabbox can run remote owner cleanup. Set
+`after-provider-release` only for adapters whose release operation preserves a
+reachable SSH target until Crabbox sends the owner release marker. Set
+`short-fence` only for retained stop/pause/keep adapters where release makes
+SSH unreachable but the underlying target is expected to be reusable after a
+bounded owner fence expires. The capability is part of the persisted routing
+and local-claim scope.
 
 Local claims are scoped to a fingerprint of the selected protocol command or
 declarative lifecycle, connection templates, `external.config`, normalized
@@ -388,6 +399,7 @@ Flags:
 --external-arg
 --external-config-json
 --external-idempotent-lease-id
+--external-release-owner-cleanup
 --external-work-root
 --external-routing-file
 --external-desktop-username
@@ -400,6 +412,7 @@ Environment:
 CRABBOX_EXTERNAL_COMMAND
 CRABBOX_EXTERNAL_ARG
 CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID
+CRABBOX_EXTERNAL_RELEASE_OWNER_CLEANUP
 CRABBOX_EXTERNAL_WORK_ROOT
 CRABBOX_EXTERNAL_ROUTING_FILE
 CRABBOX_EXTERNAL_DESKTOP_USERNAME

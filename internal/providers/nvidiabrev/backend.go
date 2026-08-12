@@ -291,7 +291,10 @@ func (b *nvidiaBrevBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool
 }
 
 func (b *nvidiaBrevBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
-	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.cfg, lease)
+	if b.releaseAction(lease.Server.Labels) == "stop" {
+		return core.ReleaseLeaseOwnerCleanupShortFence
+	}
+	return core.ReleaseLeaseOwnerCleanupGraceFence
 }
 
 func (b *nvidiaBrevBackend) ReleaseLeaseMessage(lease LeaseTarget) string {

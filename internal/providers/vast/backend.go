@@ -882,6 +882,15 @@ func effectiveVastReleaseAction(cfg core.Config, labels map[string]string) strin
 	return normalizeVastReleaseAction(firstNonBlank(labels[vastReleaseActionLabel], cfg.Vast.ReleaseAction))
 }
 
+func (b *backend) ReleaseLeaseOwnerCleanupMode(lease core.LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	switch effectiveVastReleaseAction(b.cfg, lease.Server.Labels) {
+	case "keep", "stop":
+		return core.ReleaseLeaseOwnerCleanupShortFence
+	default:
+		return core.ReleaseLeaseOwnerCleanupGraceFence
+	}
+}
+
 func parseVastInstanceID(value string) (int, bool) {
 	id, err := strconv.Atoi(strings.TrimSpace(value))
 	return id, err == nil && id > 0

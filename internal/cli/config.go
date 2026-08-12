@@ -531,7 +531,8 @@ type ExternalConfig struct {
 }
 
 type ExternalCapabilitiesConfig struct {
-	IdempotentLeaseID bool `yaml:"idempotentLeaseId,omitempty" json:"idempotentLeaseId,omitempty"`
+	IdempotentLeaseID   bool   `yaml:"idempotentLeaseId,omitempty" json:"idempotentLeaseId,omitempty"`
+	ReleaseOwnerCleanup string `yaml:"releaseOwnerCleanup,omitempty" json:"releaseOwnerCleanup,omitempty"`
 }
 
 type ExternalLifecycleConfig struct {
@@ -6226,6 +6227,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		if file.External.Capabilities != nil {
 			cfg.External.Capabilities = *file.External.Capabilities
+			cfg.credentialProvenance.externalCapabilities = credentialSource
 		}
 		if file.External.Lifecycle != nil {
 			cfg.External.Lifecycle = *file.External.Lifecycle
@@ -8788,6 +8790,11 @@ func applyEnv(cfg *Config) error {
 	ApplyExternalDesktopEnvironmentOverrides(cfg)
 	if value, ok := getenvBool("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID"); ok {
 		cfg.External.Capabilities.IdempotentLeaseID = value
+		cfg.credentialProvenance.externalCapabilities = credentialSourceEnvironment
+	}
+	if value := os.Getenv("CRABBOX_EXTERNAL_RELEASE_OWNER_CLEANUP"); value != "" {
+		cfg.External.Capabilities.ReleaseOwnerCleanup = value
+		cfg.credentialProvenance.externalCapabilities = credentialSourceEnvironment
 	}
 	cfg.Namespace.Image = getenv("CRABBOX_NAMESPACE_IMAGE", cfg.Namespace.Image)
 	cfg.Namespace.Size = getenv("CRABBOX_NAMESPACE_SIZE", cfg.Namespace.Size)

@@ -279,6 +279,35 @@ func TestLoadExternalRoutingWithDigestBindsExactGeneration(t *testing.T) {
 	}
 }
 
+func TestPersistExternalRoutingBindsReleaseOwnerCleanupCapability(t *testing.T) {
+	setExternalRoutingTestHome(t)
+	const leaseID = "cbx_owner_mode_123456"
+	path, err := PersistValidatedExternalRouting(leaseID, ExternalConfig{
+		Command: "provider",
+		Capabilities: ExternalCapabilitiesConfig{
+			ReleaseOwnerCleanup: "short-fence",
+		},
+		WorkRoot: "/work/crabbox",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Capabilities.ReleaseOwnerCleanup != "short-fence" {
+		t.Fatalf("releaseOwnerCleanup=%q", loaded.Capabilities.ReleaseOwnerCleanup)
+	}
+	digest := ExternalRoutingDigest(loaded)
+	if _, err := PersistValidatedExternalRouting(leaseID, ExternalConfig{Command: "provider", WorkRoot: "/work/crabbox"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadExternalRoutingWithDigest(path, digest); err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("routing digest accepted changed owner cleanup capability: %v", err)
+	}
+}
+
 func TestPersistExternalRoutingPreservesOnlyCurrentLoadedGeneration(t *testing.T) {
 	setExternalRoutingTestHome(t)
 	const leaseID = "cbx_generation_route_123456"

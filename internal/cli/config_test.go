@@ -596,6 +596,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_HOSTINGER_ALLOW_PURCHASE",
 		"CRABBOX_HOSTINGER_RELEASE_ACTION",
 		"CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID",
+		"CRABBOX_EXTERNAL_RELEASE_OWNER_CLEANUP",
 	} {
 		t.Setenv(key, "")
 	}
@@ -3837,7 +3838,7 @@ func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
 
 func TestExternalFixedLeaseIDCapabilityConfigAndEnv(t *testing.T) {
 	var file fileConfig
-	if err := yaml.Unmarshal([]byte("external:\n  capabilities:\n    idempotentLeaseId: true\n"), &file); err != nil {
+	if err := yaml.Unmarshal([]byte("external:\n  capabilities:\n    idempotentLeaseId: true\n    releaseOwnerCleanup: short-fence\n"), &file); err != nil {
 		t.Fatal(err)
 	}
 	cfg := baseConfig()
@@ -3847,13 +3848,21 @@ func TestExternalFixedLeaseIDCapabilityConfigAndEnv(t *testing.T) {
 	if !cfg.External.Capabilities.IdempotentLeaseID {
 		t.Fatal("external fixed lease ID capability was not loaded from YAML")
 	}
+	if cfg.External.Capabilities.ReleaseOwnerCleanup != "short-fence" {
+		t.Fatalf("external release owner cleanup capability=%q", cfg.External.Capabilities.ReleaseOwnerCleanup)
+	}
 	cfg.External.Capabilities.IdempotentLeaseID = false
+	cfg.External.Capabilities.ReleaseOwnerCleanup = ""
 	t.Setenv("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID", "true")
+	t.Setenv("CRABBOX_EXTERNAL_RELEASE_OWNER_CLEANUP", "after-provider-release")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
 	}
 	if !cfg.External.Capabilities.IdempotentLeaseID {
 		t.Fatal("external fixed lease ID capability was not loaded from the environment")
+	}
+	if cfg.External.Capabilities.ReleaseOwnerCleanup != "after-provider-release" {
+		t.Fatalf("external release owner cleanup capability from env=%q", cfg.External.Capabilities.ReleaseOwnerCleanup)
 	}
 }
 

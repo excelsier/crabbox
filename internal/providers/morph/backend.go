@@ -13,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -451,7 +452,7 @@ func (b *morphLeaseBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool
 }
 
 func (b *morphLeaseBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
-	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.configForRun(), lease)
+	return shared.DeleteOnReleaseOwnerCleanupMode(morphDeleteOnRelease(lease, b.configForRun()))
 }
 
 func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {

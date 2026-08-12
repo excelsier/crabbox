@@ -11,15 +11,16 @@ import (
 )
 
 type flagValues struct {
-	Command            *string
-	Args               *stringListFlag
-	ConfigJSON         *string
-	WorkRoot           *string
-	RoutingFile        *string
-	RoutingDigest      *string
-	DesktopUsername    *string
-	DesktopPasswordEnv *string
-	IdempotentLeaseID  *bool
+	Command             *string
+	Args                *stringListFlag
+	ConfigJSON          *string
+	WorkRoot            *string
+	RoutingFile         *string
+	RoutingDigest       *string
+	DesktopUsername     *string
+	DesktopPasswordEnv  *string
+	IdempotentLeaseID   *bool
+	ReleaseOwnerCleanup *string
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -40,9 +41,10 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 			core.ExternalRoutingDigest(defaults.External),
 			"expected SHA-256 digest for an internal external-provider routing handoff",
 		),
-		DesktopUsername:    fs.String("external-desktop-username", defaults.External.Connection.Desktop.Username, "external macOS Screen Sharing account; defaults to resolved SSH user"),
-		DesktopPasswordEnv: fs.String("external-desktop-password-env", defaults.External.Connection.Desktop.PasswordEnv, "environment variable name containing the external macOS Screen Sharing account password"),
-		IdempotentLeaseID:  fs.Bool("external-idempotent-lease-id", defaults.External.Capabilities.IdempotentLeaseID, "adapter guarantees idempotent acquisition for caller-supplied lease IDs"),
+		DesktopUsername:     fs.String("external-desktop-username", defaults.External.Connection.Desktop.Username, "external macOS Screen Sharing account; defaults to resolved SSH user"),
+		DesktopPasswordEnv:  fs.String("external-desktop-password-env", defaults.External.Connection.Desktop.PasswordEnv, "environment variable name containing the external macOS Screen Sharing account password"),
+		IdempotentLeaseID:   fs.Bool("external-idempotent-lease-id", defaults.External.Capabilities.IdempotentLeaseID, "adapter guarantees idempotent acquisition for caller-supplied lease IDs"),
+		ReleaseOwnerCleanup: fs.String("external-release-owner-cleanup", defaults.External.Capabilities.ReleaseOwnerCleanup, "external release owner cleanup mode: grace-fence, after-provider-release, or short-fence"),
 	}
 }
 
@@ -102,6 +104,11 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "external-idempotent-lease-id") {
 		cfg.External.Capabilities.IdempotentLeaseID = *v.IdempotentLeaseID
+		core.MarkExternalCapabilitiesExplicit(cfg)
+	}
+	if core.FlagWasSet(fs, "external-release-owner-cleanup") {
+		cfg.External.Capabilities.ReleaseOwnerCleanup = *v.ReleaseOwnerCleanup
+		core.MarkExternalCapabilitiesExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "external-command") || core.FlagWasSet(fs, "external-arg") || core.FlagWasSet(fs, "external-config-json") {
 		core.MarkExternalProviderOutputFlagExplicit(cfg)
@@ -144,6 +151,14 @@ func (f *stringListFlag) Set(value string) error {
 }
 
 func validateConfig(cfg core.Config) error {
+	switch normalizeReleaseOwnerCleanup(cfg.External.Capabilities.ReleaseOwnerCleanup) {
+	case "", "grace-fence", "after-provider-release", "short-fence":
+	default:
+		return core.Exit(2, "external.capabilities.releaseOwnerCleanup must be grace-fence, after-provider-release, or short-fence")
+	}
+	if err := core.ValidateExternalReleaseOwnerCleanup(cfg); err != nil {
+		return err
+	}
 	hasCommand := strings.TrimSpace(cfg.External.Command) != ""
 	hasLifecycle := lifecycleConfigured(cfg.External)
 	if hasCommand == hasLifecycle {
@@ -219,6 +234,10 @@ func validateConfig(cfg core.Config) error {
 		return core.Exit(2, "external.workRoot %q is a home directory; choose a dedicated subdirectory", clean)
 	}
 	return nil
+}
+
+func normalizeReleaseOwnerCleanup(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func externalMacOSDataVolumePath(clean string) string {

@@ -161,6 +161,9 @@ func externalLeaseCommandRoutingArgs(cfg Config, leaseID string) []string {
 		args = append(args, "--external-work-root", workRoot)
 	}
 	args = append(args, fmt.Sprintf("--external-idempotent-lease-id=%t", cfg.External.Capabilities.IdempotentLeaseID))
+	if mode := strings.TrimSpace(cfg.External.Capabilities.ReleaseOwnerCleanup); mode != "" {
+		args = append(args, "--external-release-owner-cleanup", mode)
+	}
 	return appendExternalDesktopRoutingArgs(args, cfg)
 }
 

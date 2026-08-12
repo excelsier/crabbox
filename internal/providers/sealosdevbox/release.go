@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -117,7 +118,7 @@ func (b *backend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
 }
 
 func (b *backend) ReleaseLeaseOwnerCleanupMode(lease core.LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
-	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.cfg, lease)
+	return shared.DeleteOnReleaseOwnerCleanupMode(b.deleteOnRelease(lease))
 }
 
 func (b *backend) deleteOnRelease(lease core.LeaseTarget) bool {

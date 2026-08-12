@@ -577,8 +577,8 @@ func (b *leaseBackend) RetainLeaseClaimAfterRelease(LeaseTarget) bool {
 	return true
 }
 
-func (b *leaseBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
-	return core.ReleaseLeaseOwnerCleanupModeForConfig(providerName, b.configForRun(), lease)
+func (b *leaseBackend) ReleaseLeaseOwnerCleanupMode(LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
+	return core.ReleaseLeaseOwnerCleanupShortFence
 }
 
 func validateHostingerReleaseAction(cfg Config) error {

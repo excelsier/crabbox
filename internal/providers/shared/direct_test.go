@@ -128,24 +128,6 @@ func TestReleaseLeaseOwnerCleanupModeUsesRealDirectProviderPolicy(t *testing.T) 
 			provider: "ssh",
 			want:     core.ReleaseLeaseOwnerCleanupAfterProviderRelease,
 		},
-		{
-			name:     "vast retained stop releases owner before provider stop",
-			provider: "vast",
-			cfg:      core.Config{Vast: core.VastConfig{ReleaseAction: "destroy"}},
-			lease: core.LeaseTarget{Server: core.Server{Labels: map[string]string{
-				"release_action": "stop",
-			}}},
-			want: core.ReleaseLeaseOwnerCleanupShortFence,
-		},
-		{
-			name:     "vast destructive destroy uses grace fence",
-			provider: "vast",
-			cfg:      core.Config{Vast: core.VastConfig{ReleaseAction: "destroy"}},
-			lease: core.LeaseTarget{Server: core.Server{Labels: map[string]string{
-				"release_action": "destroy",
-			}}},
-			want: core.ReleaseLeaseOwnerCleanupGraceFence,
-		},
 	}
 
 	for _, tc := range tests {

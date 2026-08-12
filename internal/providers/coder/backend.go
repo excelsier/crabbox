@@ -13,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -367,7 +368,7 @@ func (b *coderLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 }
 
 func (b *coderLeaseBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
-	return core.ReleaseLeaseOwnerCleanupModeForConfig(coderProvider, b.cfg, lease)
+	return shared.DeleteOnReleaseOwnerCleanupMode(shared.DeleteOnReleaseFromLease(b.cfg.Coder.DeleteOnRelease, core.DeleteOnReleaseExplicit(b.cfg, coderProvider), lease))
 }
 
 func (b *coderLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
