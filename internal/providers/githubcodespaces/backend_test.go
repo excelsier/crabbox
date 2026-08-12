@@ -1116,6 +1116,229 @@ func TestReleaseDeleteFallsBackToStopForDirtyCodespace(t *testing.T) {
 	}
 }
 
+func TestReleaseOwnerCleanupPlanPreflightsEffectiveDirtyFallback(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-plan-dirty", "Available")
+	item.GitStatus.HasUnpushedChanges = true
+	fc.items[item.Name] = item
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ad0"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "plan-dirty", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "plan-dirty", b.cfg, server, SSHTarget{Host: "cs-plan-dirty", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := b.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: leaseID, Server: server})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("dirty plan mode=%s, want short fence", plan.Mode)
+	}
+	if plan.ReleaseTimeout <= githubCodespacesDeleteTimeout {
+		t.Fatalf("dirty plan release timeout=%s, want > delete timeout %s", plan.ReleaseTimeout, githubCodespacesDeleteTimeout)
+	}
+	// A later clean read must not launder the preflighted dirty decision into a delete.
+	item.GitStatus.HasUnpushedChanges = false
+	fc.items[item.Name] = item
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(fc.stops, ",") != item.Name || len(fc.deletes) != 0 {
+		t.Fatalf("preflight dirty fallback actions stops=%#v deletes=%#v", fc.stops, fc.deletes)
+	}
+	if _, ok := b.releasePlans.Load(leaseID); ok {
+		t.Fatal("release plan cache retained after terminal release")
+	}
+}
+
+func TestReleaseOwnerCleanupPlanCleanDeleteFailsClosedOnDirtyDrift(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-plan-clean", "Available")
+	fc.items[item.Name] = item
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ad1"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "plan-clean", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "plan-clean", b.cfg, server, SSHTarget{Host: "cs-plan-clean", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := b.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: leaseID, Server: server})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("clean plan mode=%s, want grace fence", plan.Mode)
+	}
+	if plan.ReleaseTimeout <= githubCodespacesDeleteTimeout {
+		t.Fatalf("clean plan release timeout=%s, want > delete timeout %s", plan.ReleaseTimeout, githubCodespacesDeleteTimeout)
+	}
+	item.GitStatus.HasUncommittedChanges = true
+	fc.items[item.Name] = item
+	err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "uncommitted or unpushed changes") {
+		t.Fatalf("dirty drift release err=%v, want fail-closed dirty error", err)
+	}
+	if len(fc.stops) != 0 || len(fc.deletes) != 0 {
+		t.Fatalf("dirty drift mutated stops=%#v deletes=%#v", fc.stops, fc.deletes)
+	}
+	if _, ok := b.releasePlans.Load(leaseID); ok {
+		t.Fatal("release plan cache retained after dirty drift failure")
+	}
+}
+
+func TestReleaseOwnerCleanupPlanUncertaintyUsesConservativeGrace(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-plan-uncertain", "Available")
+	fc.items[item.Name] = item
+	fc.getErr = errors.New("api unavailable")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ad2"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "plan-uncertain", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "plan-uncertain", b.cfg, server, SSHTarget{Host: "cs-plan-uncertain", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := b.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: leaseID, Server: server})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("uncertain plan mode=%s, want grace fence", plan.Mode)
+	}
+	if value, ok := b.releasePlans.Load(leaseID); !ok {
+		t.Fatal("uncertain delete plan should cache delete-or-fail decision")
+	} else if plan, ok := value.(githubCodespacesReleaseOwnerPlan); !ok || !plan.forceDelete || plan.forceStop {
+		t.Fatalf("uncertain delete plan cache=%#v, want force delete only", value)
+	}
+}
+
+func TestReleaseOwnerCleanupPlanUncertaintyFailsClosedOnFreshDirtyState(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-plan-uncertain-dirty", "Available")
+	fc.items[item.Name] = item
+	fc.getErr = errors.New("api temporarily unavailable")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ad3"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "plan-uncertain-dirty", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "plan-uncertain-dirty", b.cfg, server, SSHTarget{Host: "cs-plan-uncertain-dirty", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := b.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: leaseID, Server: server})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("uncertain plan mode=%s, want grace fence", plan.Mode)
+	}
+	fc.getErr = nil
+	item.GitStatus.HasUnpushedChanges = true
+	fc.items[item.Name] = item
+	err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "uncommitted or unpushed changes") {
+		t.Fatalf("fresh dirty release err=%v, want fail-closed dirty error", err)
+	}
+	if len(fc.stops) != 0 || len(fc.deletes) != 0 {
+		t.Fatalf("fresh dirty after uncertain plan mutated stops=%#v deletes=%#v", fc.stops, fc.deletes)
+	}
+	if _, ok := b.releasePlans.Load(leaseID); ok {
+		t.Fatal("release plan cache retained after uncertain dirty failure")
+	}
+}
+
+func TestReleaseOwnerCleanupPlanCacheClearsOnEarlyReleaseError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-plan-early-error", "Available")
+	fc.items[item.Name] = item
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ad4"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "plan-early-error", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "plan-early-error", b.cfg, server, SSHTarget{Host: item.Name, Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := b.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: leaseID, Server: server})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("plan mode=%s, want grace fence", plan.Mode)
+	}
+	fg.authErr = errors.New("auth unavailable")
+	err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "auth unavailable") {
+		t.Fatalf("release err=%v, want auth unavailable", err)
+	}
+	if _, ok := b.releasePlans.Load(leaseID); ok {
+		t.Fatal("release plan cache retained after early release error")
+	}
+}
+
+func TestReleaseOwnerCleanupPlanCacheClearsWhenConfigDriftsToStop(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-plan-config-drift", "Available")
+	fc.items[item.Name] = item
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ad5"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "plan-config-drift", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "plan-config-drift", b.cfg, server, SSHTarget{Host: item.Name, Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := b.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: leaseID, Server: server})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("plan mode=%s, want grace fence", plan.Mode)
+	}
+	b.cfg.GitHubCodespaces.DeleteOnRelease = false
+	markDeleteOnReleaseExplicit(&b.cfg)
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(fc.stops, ",") != item.Name || len(fc.deletes) != 0 {
+		t.Fatalf("config drift to stop actions stops=%#v deletes=%#v", fc.stops, fc.deletes)
+	}
+	if _, ok := b.releasePlans.Load(leaseID); ok {
+		t.Fatal("release plan cache retained after delete-to-stop config drift")
+	}
+}
+
+func TestReleaseOwnerCleanupPlanFinalizerClearsCachedDecision(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-plan-finalize", "Available")
+	fc.items[item.Name] = item
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ad6"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "plan-finalize", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "plan-finalize", b.cfg, server, SSHTarget{Host: item.Name, Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := b.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: leaseID, Server: server})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.releasePlans.Load(leaseID); !ok {
+		t.Fatal("expected cached cleanup decision before finalizer")
+	}
+	b.FinalizeReleaseLeaseOwnerCleanupPlan(LeaseTarget{LeaseID: leaseID, Server: server}, plan)
+	if _, ok := b.releasePlans.Load(leaseID); ok {
+		t.Fatal("cached cleanup decision survived finalizer")
+	}
+}
+
 func TestReleaseDirtyCodespaceRefusesZeroRetentionWithoutStopping(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -1734,6 +1957,7 @@ type fakeCodespacesClient struct {
 	useCreateResult bool
 	onCreate        func(createCodespaceRequest)
 	onGet           func(string)
+	getErr          error
 	onStart         func(string)
 	onStop          func(string)
 	listErr         error
@@ -1797,6 +2021,9 @@ func (f *fakeCodespacesClient) getCodespace(_ context.Context, name string) (cod
 	if f.onGet != nil {
 		f.onGet(name)
 	}
+	if f.getErr != nil {
+		return codespace{}, f.getErr
+	}
 	if seq := f.getSeq[name]; len(seq) > 0 {
 		item := seq[0]
 		f.getSeq[name] = seq[1:]
@@ -1858,9 +2085,10 @@ type fakeGH struct {
 	login     string
 	token     string
 	configFor string
+	authErr   error
 }
 
-func (f *fakeGH) authStatus(context.Context) error { return nil }
+func (f *fakeGH) authStatus(context.Context) error { return f.authErr }
 func (f *fakeGH) authToken(context.Context) (string, error) {
 	return f.token, nil
 }

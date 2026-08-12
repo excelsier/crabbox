@@ -56,6 +56,20 @@ func TestProviderSpecAndFlags(t *testing.T) {
 	}
 }
 
+func TestHostingerReleaseOwnerCleanupPlanCoversStopTimeout(t *testing.T) {
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{}).(*leaseBackend)
+	plan, err := backend.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: "cbx_hostinger_plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("cleanup mode=%s, want short fence", plan.Mode)
+	}
+	if plan.ReleaseTimeout <= hostingerStopWaitTimeout {
+		t.Fatalf("cleanup release timeout=%s, want > stop timeout %s", plan.ReleaseTimeout, hostingerStopWaitTimeout)
+	}
+}
+
 func TestClientValidationAndRedaction(t *testing.T) {
 	cfg := core.Config{Hostinger: core.HostingerConfig{APIURL: "https://developers.hostinger.com"}}
 	if _, err := newClient(cfg, core.Runtime{}); err == nil {

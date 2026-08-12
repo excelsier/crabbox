@@ -53,6 +53,10 @@ func (b *coordinatorLeaseBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget
 	return ReleaseLeaseOwnerCleanupGraceFence
 }
 
+func (b *coordinatorLeaseBackend) ReleaseLeaseOwnerCleanupPlan(context.Context, LeaseTarget) (ReleaseLeaseOwnerCleanupPlan, error) {
+	return ReleaseLeaseOwnerCleanupPlan{Mode: ReleaseLeaseOwnerCleanupGraceFence}, nil
+}
+
 func (b *coordinatorLeaseBackend) ReleaseLeaseNeedsOwnerGraceFence(lease LeaseTarget) bool {
 	return b.ReleaseLeaseOwnerCleanupMode(lease) == ReleaseLeaseOwnerCleanupGraceFence
 }

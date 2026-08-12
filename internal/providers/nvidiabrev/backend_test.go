@@ -1633,6 +1633,16 @@ func TestNvidiaBrevRetainLeaseClaimAfterReleaseUsesStoredPolicy(t *testing.T) {
 	if got := backend.ReleaseLeaseOwnerCleanupMode(LeaseTarget{Server: Server{Labels: map[string]string{"release": "delete"}}}); got != core.ReleaseLeaseOwnerCleanupGraceFence {
 		t.Fatalf("stored delete cleanup mode=%s, want grace fence", got)
 	}
+	plan, err := backend.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{Server: Server{Labels: map[string]string{"release": "delete"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("stored delete cleanup plan mode=%s, want grace fence", plan.Mode)
+	}
+	if plan.ReleaseTimeout <= brevDeletePollTimeout {
+		t.Fatalf("stored delete release timeout=%s, want > delete poll timeout %s", plan.ReleaseTimeout, brevDeletePollTimeout)
+	}
 	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "delete"}}
 	markReleaseActionExplicit(&cfg)
 	backend = NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{}).(*nvidiaBrevBackend)

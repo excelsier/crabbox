@@ -96,9 +96,9 @@ func TestCoderReleaseLeaseOwnerCleanupModeUsesRetainedStopPolicy(t *testing.T) {
 	}
 }
 
-func TestCoderReleaseLeaseOwnerCleanupModeHonorsPersistedStopUnlessCurrentConfigExplicit(t *testing.T) {
+func TestCoderReleaseLeaseOwnerCleanupModeMatchesCurrentReleaseConfig(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: true}}
+	cfg := Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: false}}
 	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
@@ -106,11 +106,12 @@ func TestCoderReleaseLeaseOwnerCleanupModeHonorsPersistedStopUnlessCurrentConfig
 	policy := backend.(interface {
 		ReleaseLeaseOwnerCleanupMode(LeaseTarget) core.ReleaseLeaseOwnerCleanupMode
 	})
-	lease := LeaseTarget{Server: Server{Labels: map[string]string{coderReleaseActionLabel: coderReleaseActionStop}}}
+	lease := LeaseTarget{Server: Server{Labels: map[string]string{coderReleaseActionLabel: coderReleaseActionDelete}}}
 	if got := policy.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
-		t.Fatalf("non-explicit current delete config overrode persisted stop label: mode=%s", got)
+		t.Fatalf("current stop config should ignore persisted delete label: mode=%s", got)
 	}
 
+	cfg.Coder.DeleteOnRelease = true
 	core.MarkDeleteOnReleaseExplicit(&cfg, coderProvider)
 	backend, err = NewCoderLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
@@ -120,7 +121,7 @@ func TestCoderReleaseLeaseOwnerCleanupModeHonorsPersistedStopUnlessCurrentConfig
 		ReleaseLeaseOwnerCleanupMode(LeaseTarget) core.ReleaseLeaseOwnerCleanupMode
 	})
 	if got := policy.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupGraceFence {
-		t.Fatalf("explicit current delete config did not override persisted stop label: mode=%s", got)
+		t.Fatalf("current delete config should grace-fence persisted label drift: mode=%s", got)
 	}
 }
 

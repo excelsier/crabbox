@@ -30,6 +30,7 @@ var (
 	hostingerSleep                   = time.Sleep
 	hostingerPurchaseRecoveryTimeout = time.Minute
 	hostingerStopWaitTimeout         = 2 * time.Minute
+	hostingerReleaseTimeout          = hostingerStopWaitTimeout + 30*time.Second
 )
 
 const (
@@ -579,6 +580,10 @@ func (b *leaseBackend) RetainLeaseClaimAfterRelease(LeaseTarget) bool {
 
 func (b *leaseBackend) ReleaseLeaseOwnerCleanupMode(LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
 	return core.ReleaseLeaseOwnerCleanupShortFence
+}
+
+func (b *leaseBackend) ReleaseLeaseOwnerCleanupPlan(context.Context, LeaseTarget) (core.ReleaseLeaseOwnerCleanupPlan, error) {
+	return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupShortFence, ReleaseTimeout: hostingerReleaseTimeout}, nil
 }
 
 func validateHostingerReleaseAction(cfg Config) error {

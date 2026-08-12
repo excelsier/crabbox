@@ -14,12 +14,13 @@ import (
 )
 
 const (
-	brevAcquirePollInterval = 2 * time.Second
-	brevAcquirePollTimeout  = 12 * time.Minute
-	brevCreateRecoveryGrace = 30 * time.Minute
-	brevDeletePollInterval  = 2 * time.Second
-	brevDeletePollTimeout   = 12 * time.Minute
-	brevWorkspaceNameMaxLen = 63
+	brevAcquirePollInterval  = 2 * time.Second
+	brevAcquirePollTimeout   = 12 * time.Minute
+	brevCreateRecoveryGrace  = 30 * time.Minute
+	brevDeletePollInterval   = 2 * time.Second
+	brevDeletePollTimeout    = 12 * time.Minute
+	brevDeleteReleaseTimeout = brevDeletePollTimeout + 3*time.Minute
+	brevWorkspaceNameMaxLen  = 63
 )
 
 var normalizeBrevSlugPattern = regexp.MustCompile(`[^a-z0-9]+`)
@@ -295,6 +296,13 @@ func (b *nvidiaBrevBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core
 		return core.ReleaseLeaseOwnerCleanupShortFence
 	}
 	return core.ReleaseLeaseOwnerCleanupGraceFence
+}
+
+func (b *nvidiaBrevBackend) ReleaseLeaseOwnerCleanupPlan(_ context.Context, lease LeaseTarget) (core.ReleaseLeaseOwnerCleanupPlan, error) {
+	if b.releaseAction(lease.Server.Labels) == "stop" {
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupShortFence}, nil
+	}
+	return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: brevDeleteReleaseTimeout}, nil
 }
 
 func (b *nvidiaBrevBackend) ReleaseLeaseMessage(lease LeaseTarget) string {

@@ -368,7 +368,7 @@ func (b *coderLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 }
 
 func (b *coderLeaseBackend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
-	return shared.DeleteOnReleaseOwnerCleanupMode(shared.DeleteOnReleaseFromLease(b.cfg.Coder.DeleteOnRelease, core.DeleteOnReleaseExplicit(b.cfg, coderProvider), lease))
+	return shared.DeleteOnReleaseOwnerCleanupMode(b.cfg.Coder.DeleteOnRelease)
 }
 
 func (b *coderLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {

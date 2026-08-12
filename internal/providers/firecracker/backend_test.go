@@ -13,6 +13,7 @@ import (
 
 	"github.com/containernetworking/cni/libcni"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestProviderSpecAndAliases(t *testing.T) {
@@ -92,7 +93,7 @@ func TestApplyFlagsUpdatesFirecrackerConfig(t *testing.T) {
 func TestFirecrackerReleaseLeaseOwnerCleanupModeUsesRetainedStatePolicy(t *testing.T) {
 	cfg := Config{Firecracker: core.FirecrackerConfig{DeleteOnRelease: false}}
 	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
-	fcBackend := &backend{cfg: cfg}
+	fcBackend := newBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*backend)
 	lease := LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}
 	if got := fcBackend.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
 		t.Fatalf("stop cleanup mode=%s, want short fence", got)
@@ -100,10 +101,63 @@ func TestFirecrackerReleaseLeaseOwnerCleanupModeUsesRetainedStatePolicy(t *testi
 
 	cfg.Firecracker.DeleteOnRelease = true
 	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
-	fcBackend = &backend{cfg: cfg}
+	fcBackend = newBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*backend)
 	lease = LeaseTarget{Server: Server{Labels: map[string]string{"release": "delete"}}}
 	if got := fcBackend.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupGraceFence {
 		t.Fatalf("delete cleanup mode=%s, want grace fence", got)
+	}
+}
+
+func TestFirecrackerReleaseLeaseOwnerCleanupPlanUsesPersistedStateRecord(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	cfg := Config{Firecracker: core.FirecrackerConfig{DeleteOnRelease: true}}
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
+	fcBackend := newBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*backend)
+	record := leaseStateRecord{
+		LeaseID:         "cbx_fc_stop",
+		Slug:            "fc-stop",
+		Name:            "fc-stop",
+		DeleteOnRelease: false,
+		Labels:          map[string]string{"lease": "cbx_fc_stop", "release": "stop"},
+	}
+	if err := fcBackend.writeStateRecord(record); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := fcBackend.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: record.LeaseID, Server: Server{Labels: map[string]string{"release": "delete"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupShortFence {
+		t.Fatalf("persisted retained stop plan mode=%s, want short fence", plan.Mode)
+	}
+
+	cfg.Firecracker.DeleteOnRelease = false
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
+	fcBackend = newBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*backend)
+	record.LeaseID = "cbx_fc_delete"
+	record.DeleteOnRelease = true
+	record.Labels = map[string]string{"lease": "cbx_fc_delete", "release": "stop"}
+	if err := fcBackend.writeStateRecord(record); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = fcBackend.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: record.LeaseID, Server: Server{Labels: map[string]string{"release": "stop"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("persisted delete plan mode=%s, want grace fence", plan.Mode)
+	}
+}
+
+func TestFirecrackerReleaseLeaseOwnerCleanupPlanUncertaintyFailsGrace(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	fcBackend := newBackend(Provider{}.Spec(), Config{Firecracker: core.FirecrackerConfig{DeleteOnRelease: false}}, core.Runtime{}).(*backend)
+	plan, err := fcBackend.ReleaseLeaseOwnerCleanupPlan(context.Background(), LeaseTarget{LeaseID: "cbx_missing_state", Server: Server{Labels: map[string]string{"release": "stop"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ReleaseLeaseOwnerCleanupGraceFence {
+		t.Fatalf("missing state plan mode=%s, want grace fence", plan.Mode)
 	}
 }
 

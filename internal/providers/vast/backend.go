@@ -884,7 +884,9 @@ func effectiveVastReleaseAction(cfg core.Config, labels map[string]string) strin
 
 func (b *backend) ReleaseLeaseOwnerCleanupMode(lease core.LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
 	switch effectiveVastReleaseAction(b.cfg, lease.Server.Labels) {
-	case "keep", "stop":
+	case "keep":
+		return core.ReleaseLeaseOwnerCleanupAfterProviderRelease
+	case "stop":
 		return core.ReleaseLeaseOwnerCleanupShortFence
 	default:
 		return core.ReleaseLeaseOwnerCleanupGraceFence

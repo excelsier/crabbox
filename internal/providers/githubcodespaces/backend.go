@@ -13,6 +13,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -48,11 +49,13 @@ type backend struct {
 	now              func() time.Time
 	pollInterval     time.Duration
 	readyTimeout     time.Duration
+	releasePlans     sync.Map
 }
 
 const (
 	githubCodespacesRollbackTimeout = 30 * time.Second
 	githubCodespacesDeleteTimeout   = 2 * time.Minute
+	githubCodespacesReleaseTimeout  = githubCodespacesDeleteTimeout + 2*time.Minute
 )
 
 const (
@@ -583,6 +586,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		return err
 	}
 	defer unlockOperation()
+	preparedPlan, hasPreparedPlan := b.releaseOwnerPlan(leaseID)
 	_, api, user, err := b.controlPlane(ctx)
 	if err != nil {
 		return err
@@ -620,13 +624,22 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			return err
 		}
 		if err == nil {
+			if hasPreparedPlan && preparedPlan.forceStop {
+				return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
+			}
 			if err := validateDeleteSafe(item); err != nil {
+				if hasPreparedPlan && preparedPlan.forceDelete {
+					return err
+				}
 				return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
 			}
 		}
 		if err := b.deleteClaimedCodespace(ctx, api, claim, name); err != nil {
 			var unsafe *unsafeCodespaceDeleteError
 			if errors.As(err, &unsafe) {
+				if hasPreparedPlan && preparedPlan.forceDelete {
+					return err
+				}
 				return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
 			}
 			return err
@@ -771,6 +784,91 @@ func (b *backend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
 
 func (b *backend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLeaseOwnerCleanupMode {
 	return shared.DeleteOnReleaseOwnerCleanupMode(githubCodespacesDeleteOnRelease(lease, b.cfg))
+}
+
+type githubCodespacesReleaseOwnerPlan struct {
+	forceStop   bool
+	forceDelete bool
+}
+
+func (b *backend) ReleaseLeaseOwnerCleanupPlan(ctx context.Context, lease LeaseTarget) (core.ReleaseLeaseOwnerCleanupPlan, error) {
+	if !githubCodespacesDeleteOnRelease(lease, b.cfg) {
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupShortFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	leaseID := strings.TrimSpace(lease.LeaseID)
+	if leaseID == "" {
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	storeDeleteOrFail := func() {
+		b.releasePlans.Store(leaseID, githubCodespacesReleaseOwnerPlan{forceDelete: true})
+	}
+	claim, claimOK, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		storeDeleteOrFail()
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	if !claimOK {
+		storeDeleteOrFail()
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(claim.Labels[labelRelease]), releaseStop) {
+		b.releasePlans.Store(leaseID, githubCodespacesReleaseOwnerPlan{forceStop: true})
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupShortFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	_, api, user, err := b.controlPlane(ctx)
+	if err != nil {
+		storeDeleteOrFail()
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	server := serverFromClaim(claim)
+	if err := b.validateClaimForServer(claim, server, user); err != nil {
+		storeDeleteOrFail()
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	name := firstNonEmpty(server.CloudID, server.Name, server.Labels[labelCodespaceName])
+	if name == "" {
+		storeDeleteOrFail()
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	item, err := api.getCodespace(ctx, name)
+	if err != nil {
+		storeDeleteOrFail()
+		if isGitHubNotFound(err) {
+			return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+		}
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	if err := validateCodespaceClaimResource(claim, item); err != nil {
+		storeDeleteOrFail()
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	if err := validateDeleteSafe(item); err != nil {
+		var unsafe *unsafeCodespaceDeleteError
+		if errors.As(err, &unsafe) {
+			if stopErr := validateStopPreservesCodespace(item); stopErr != nil {
+				storeDeleteOrFail()
+				return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+			}
+			b.releasePlans.Store(leaseID, githubCodespacesReleaseOwnerPlan{forceStop: true})
+			return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupShortFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+		}
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+	}
+	b.releasePlans.Store(leaseID, githubCodespacesReleaseOwnerPlan{forceDelete: true})
+	return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence, ReleaseTimeout: githubCodespacesReleaseTimeout}, nil
+}
+
+func (b *backend) releaseOwnerPlan(leaseID string) (githubCodespacesReleaseOwnerPlan, bool) {
+	value, ok := b.releasePlans.LoadAndDelete(strings.TrimSpace(leaseID))
+	if !ok {
+		return githubCodespacesReleaseOwnerPlan{}, false
+	}
+	plan, ok := value.(githubCodespacesReleaseOwnerPlan)
+	return plan, ok
+}
+
+func (b *backend) FinalizeReleaseLeaseOwnerCleanupPlan(lease LeaseTarget, _ core.ReleaseLeaseOwnerCleanupPlan) {
+	b.releasePlans.Delete(strings.TrimSpace(lease.LeaseID))
 }
 
 func githubCodespacesClaimRelease(leaseID string) string {

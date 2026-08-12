@@ -16,10 +16,16 @@ import (
 const (
 	workspaceOwnerTTL           = 45 * time.Second
 	workspaceOwnerRenewInterval = 10 * time.Second
+	// Retained stop/pause/keep releases can make SSH unreachable before a remote
+	// RELEASE is possible. Keep the marker through bounded provider cleanup, then
+	// let it expire promptly enough for reuse.
+	workspaceOwnerReleaseShortTTL    = 5 * time.Minute
+	workspaceOwnerReleaseFenceMargin = 30 * time.Second
+	workspaceOwnerReuseWaitMargin    = 30 * time.Second
 	// releaseCoordinatorLease can spend about 320 seconds across five timed
 	// attempts and backoff. Keep the fence valid beyond that whole retry window.
 	workspaceOwnerReleaseGraceTTL = 10 * time.Minute
-	workspaceOwnerWaitTimeout     = 2 * time.Minute
+	workspaceOwnerWaitTimeout     = workspaceOwnerReleaseShortTTL + workspaceOwnerReuseWaitMargin
 	workspaceOwnerPollInterval    = time.Second
 	workspaceOwnerProgressEvery   = 10 * time.Second
 )

@@ -414,6 +414,15 @@ func (b *backend) ReleaseLeaseOwnerCleanupMode(lease LeaseTarget) core.ReleaseLe
 	return shared.DeleteOnReleaseOwnerCleanupMode(shared.DeleteOnReleaseFromLease(cfg.Firecracker.DeleteOnRelease, core.DeleteOnReleaseExplicit(cfg, providerName), lease))
 }
 
+func (b *backend) ReleaseLeaseOwnerCleanupPlan(_ context.Context, lease LeaseTarget) (core.ReleaseLeaseOwnerCleanupPlan, error) {
+	cfg := b.configForRun()
+	record, found, err := b.releaseRecordForLease(cfg, lease)
+	if err != nil || !found {
+		return core.ReleaseLeaseOwnerCleanupPlan{Mode: core.ReleaseLeaseOwnerCleanupGraceFence}, nil
+	}
+	return core.ReleaseLeaseOwnerCleanupPlan{Mode: shared.DeleteOnReleaseOwnerCleanupMode(record.DeleteOnRelease)}, nil
+}
+
 func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	cfg := b.configForRun()
 	records, err := b.listStateRecords()
@@ -719,7 +728,17 @@ func (b *backend) releaseStateRecord(ctx context.Context, cfg Config, record lea
 }
 
 func (b *backend) releaseRecordForLease(cfg Config, lease LeaseTarget) (leaseStateRecord, bool, error) {
-	identifier := firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"], lease.Server.Name, lease.Server.CloudID)
+	leaseID := firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"])
+	if strings.TrimSpace(leaseID) != "" {
+		record, err := b.readStateRecord(leaseID)
+		if err == nil {
+			return record, true, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return leaseStateRecord{}, false, err
+		}
+	}
+	identifier := firstNonBlank(leaseID, lease.Server.Name, lease.Server.CloudID)
 	if strings.TrimSpace(identifier) == "" {
 		return leaseStateRecord{}, false, nil
 	}

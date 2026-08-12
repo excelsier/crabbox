@@ -268,6 +268,25 @@ const (
 	ReleaseLeaseOwnerCleanupGraceFence ReleaseLeaseOwnerCleanupMode = "grace-fence"
 )
 
+type ReleaseLeaseOwnerCleanupPlan struct {
+	Mode           ReleaseLeaseOwnerCleanupMode
+	FenceTTL       time.Duration
+	ReleaseTimeout time.Duration
+}
+
+// ReleaseLeaseOwnerCleanupPlanner lets providers choose how run cleanup fences
+// the remote workspace-owner marker relative to provider ReleaseLease, including
+// the provider-specific duration needed to cover its bounded cleanup.
+type ReleaseLeaseOwnerCleanupPlanner interface {
+	ReleaseLeaseOwnerCleanupPlan(context.Context, LeaseTarget) (ReleaseLeaseOwnerCleanupPlan, error)
+}
+
+// ReleaseLeaseOwnerCleanupPlanFinalizer lets a provider discard plan-local
+// state if owner preparation fails before ReleaseLease is invoked.
+type ReleaseLeaseOwnerCleanupPlanFinalizer interface {
+	FinalizeReleaseLeaseOwnerCleanupPlan(LeaseTarget, ReleaseLeaseOwnerCleanupPlan)
+}
+
 // ReleaseLeaseOwnerCleanupPolicy lets providers choose how run cleanup fences
 // the remote workspace-owner marker relative to provider ReleaseLease.
 type ReleaseLeaseOwnerCleanupPolicy interface {

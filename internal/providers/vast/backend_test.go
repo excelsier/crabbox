@@ -680,8 +680,8 @@ func TestReleaseLeaseOwnerCleanupModeHonorsVastReleaseAction(t *testing.T) {
 	}
 
 	lease.Server.Labels[vastReleaseActionLabel] = "keep"
-	if got := b.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
-		t.Fatalf("persisted keep mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupShortFence)
+	if got := b.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupAfterProviderRelease {
+		t.Fatalf("persisted keep mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupAfterProviderRelease)
 	}
 
 	lease.Server.Labels[vastReleaseActionLabel] = "destroy"
@@ -694,6 +694,12 @@ func TestReleaseLeaseOwnerCleanupModeHonorsVastReleaseAction(t *testing.T) {
 	lease.Server.Labels[vastReleaseActionLabel] = "destroy"
 	if got := b.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupShortFence {
 		t.Fatalf("explicit stop mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupShortFence)
+	}
+
+	b.cfg.Vast.ReleaseAction = "keep"
+	lease.Server.Labels[vastReleaseActionLabel] = "stop"
+	if got := b.ReleaseLeaseOwnerCleanupMode(lease); got != core.ReleaseLeaseOwnerCleanupAfterProviderRelease {
+		t.Fatalf("explicit keep mode=%s, want %s", got, core.ReleaseLeaseOwnerCleanupAfterProviderRelease)
 	}
 }
 

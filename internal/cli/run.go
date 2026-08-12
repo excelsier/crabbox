@@ -566,7 +566,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var workdir string
 	var hydratedByActions bool
 	var lifecycleOwner *workspaceOwner
-	var lifecycleOwnerCleanupMode ReleaseLeaseOwnerCleanupMode
+	lifecycleOwnerCleanupPlan := ReleaseLeaseOwnerCleanupPlan{Mode: ReleaseLeaseOwnerCleanupAfterProviderRelease}
 	ownerParentCtx := ctx
 	defer func() {
 		if lifecycleOwner == nil {
@@ -574,7 +574,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if cleanup.Stopped {
 			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
-			closeErr := closeWorkspaceOwnerAfterLeaseRelease(releaseCtx, lifecycleOwner, lifecycleOwnerCleanupMode)
+			closeErr := closeWorkspaceOwnerAfterLeaseRelease(releaseCtx, lifecycleOwner, lifecycleOwnerCleanupPlan)
 			cancel()
 			if closeErr != nil {
 				runFailure = recordRunFailure(&runFailure, closeErr)
@@ -583,11 +583,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 			return
 		}
-		if lifecycleOwnerCleanupMode == ReleaseLeaseOwnerCleanupShortFence {
+		if releaseLeaseOwnerCleanupPlanFenced(lifecycleOwnerCleanupPlan) {
 			return
 		}
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
-		closeErr := lifecycleOwner.Close(releaseCtx)
+		closeErr := closeWorkspaceOwnerAfterLeaseReleaseFailure(releaseCtx, lifecycleOwner, lifecycleOwnerCleanupPlan)
 		cancel()
 		if closeErr != nil {
 			runFailure = recordRunFailure(&runFailure, closeErr)
@@ -950,6 +950,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure) {
 			return
 		}
+		releaseLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
 		if lifecycleOwner != nil {
 			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 15*time.Second)
 			ownerErr := lifecycleOwner.ConfirmNoChild(inspectCtx)
@@ -962,7 +963,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				return
 			}
 			releaseOwnerCtx, releaseOwnerCancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
-			lifecycleOwnerCleanupMode, ownerErr = prepareWorkspaceOwnerForLeaseRelease(releaseOwnerCtx, lifecycleOwner, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+			lifecycleOwnerCleanupPlan, ownerErr = prepareWorkspaceOwnerForLeaseReleaseOrFinalize(releaseOwnerCtx, lifecycleOwner, sshBackend, releaseLease)
 			releaseOwnerCancel()
 			if ownerErr != nil {
 				cleanup.Err = ownerErr
@@ -977,7 +978,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			releaseApp.Stderr = io.Discard
 		}
 		cleanup.Attempted = true
-		cleanup.Err = releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+		cleanup.Err = releaseApp.releaseBackendLeaseBestEffortWithPlan(context.Background(), sshBackend, cfg, releaseLease, lifecycleOwnerCleanupPlan)
 		cleanup.Stopped = cleanup.Err == nil
 		if cleanup.Err == nil {
 			recorder.Event("lease.released", "released", "")
@@ -3221,9 +3222,74 @@ func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLease
 	return nil
 }
 
+func (a App) releaseBackendLeaseBestEffortWithPlan(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget, plan ReleaseLeaseOwnerCleanupPlan) error {
+	if plan.ReleaseTimeout <= 0 {
+		return a.releaseBackendLeaseBestEffort(ctx, backend, cfg, lease)
+	}
+	releaseCtx, cancel := context.WithTimeout(ctx, plan.ReleaseTimeout)
+	defer cancel()
+	return a.releaseBackendLeaseBestEffort(releaseCtx, backend, cfg, lease)
+}
+
 func releaseLeaseConnectionCleanupSafe(backend SSHLeaseBackend) bool {
 	policy, ok := backend.(ReleaseLeaseConnectionCleanupPolicy)
 	return !ok || policy.ReleaseLeaseConnectionCleanupSafe()
+}
+
+func normalizeReleaseLeaseOwnerCleanupPlan(plan ReleaseLeaseOwnerCleanupPlan) ReleaseLeaseOwnerCleanupPlan {
+	switch plan.Mode {
+	case ReleaseLeaseOwnerCleanupAfterProviderRelease:
+		plan.FenceTTL = 0
+		if plan.ReleaseTimeout < 0 {
+			plan.ReleaseTimeout = 0
+		}
+	case ReleaseLeaseOwnerCleanupShortFence:
+		if plan.ReleaseTimeout <= 0 {
+			plan.ReleaseTimeout = workspaceOwnerReleaseShortTTL - workspaceOwnerReleaseFenceMargin
+		}
+		minFenceTTL := plan.ReleaseTimeout + workspaceOwnerReleaseFenceMargin
+		if minFenceTTL < workspaceOwnerReleaseShortTTL {
+			minFenceTTL = workspaceOwnerReleaseShortTTL
+		}
+		if plan.FenceTTL < minFenceTTL {
+			plan.FenceTTL = minFenceTTL
+		}
+	case ReleaseLeaseOwnerCleanupGraceFence:
+		if plan.ReleaseTimeout <= 0 {
+			plan.ReleaseTimeout = workspaceOwnerReleaseGraceTTL - workspaceOwnerReleaseFenceMargin
+		}
+		minFenceTTL := plan.ReleaseTimeout + workspaceOwnerReleaseFenceMargin
+		if minFenceTTL < workspaceOwnerReleaseGraceTTL {
+			minFenceTTL = workspaceOwnerReleaseGraceTTL
+		}
+		if plan.FenceTTL < minFenceTTL {
+			plan.FenceTTL = minFenceTTL
+		}
+	default:
+		plan.Mode = ReleaseLeaseOwnerCleanupGraceFence
+		if plan.ReleaseTimeout <= 0 {
+			plan.ReleaseTimeout = workspaceOwnerReleaseGraceTTL - workspaceOwnerReleaseFenceMargin
+		}
+		minFenceTTL := plan.ReleaseTimeout + workspaceOwnerReleaseFenceMargin
+		if minFenceTTL < workspaceOwnerReleaseGraceTTL {
+			minFenceTTL = workspaceOwnerReleaseGraceTTL
+		}
+		if plan.FenceTTL < minFenceTTL {
+			plan.FenceTTL = minFenceTTL
+		}
+	}
+	return plan
+}
+
+func releaseLeaseOwnerCleanupPlan(ctx context.Context, backend SSHLeaseBackend, lease LeaseTarget) (ReleaseLeaseOwnerCleanupPlan, error) {
+	if planner, ok := backend.(ReleaseLeaseOwnerCleanupPlanner); ok {
+		plan, err := planner.ReleaseLeaseOwnerCleanupPlan(ctx, lease)
+		if err != nil {
+			return ReleaseLeaseOwnerCleanupPlan{Mode: ReleaseLeaseOwnerCleanupGraceFence, FenceTTL: workspaceOwnerReleaseGraceTTL}, err
+		}
+		return normalizeReleaseLeaseOwnerCleanupPlan(plan), nil
+	}
+	return normalizeReleaseLeaseOwnerCleanupPlan(ReleaseLeaseOwnerCleanupPlan{Mode: releaseLeaseOwnerCleanupMode(backend, lease)}), nil
 }
 
 func releaseLeaseOwnerCleanupMode(backend SSHLeaseBackend, lease LeaseTarget) ReleaseLeaseOwnerCleanupMode {
@@ -3243,34 +3309,71 @@ func releaseLeaseNeedsOwnerGraceFence(backend SSHLeaseBackend, lease LeaseTarget
 	return releaseLeaseOwnerCleanupMode(backend, lease) == ReleaseLeaseOwnerCleanupGraceFence
 }
 
-func prepareWorkspaceOwnerForLeaseRelease(ctx context.Context, owner *workspaceOwner, backend SSHLeaseBackend, lease LeaseTarget) (ReleaseLeaseOwnerCleanupMode, error) {
-	if owner == nil {
-		return ReleaseLeaseOwnerCleanupAfterProviderRelease, nil
+func releaseLeaseOwnerCleanupPlanFenced(plan ReleaseLeaseOwnerCleanupPlan) bool {
+	return plan.Mode == ReleaseLeaseOwnerCleanupShortFence || plan.Mode == ReleaseLeaseOwnerCleanupGraceFence
+}
+
+func validateReleaseLeaseOwnerCleanupPlan(plan ReleaseLeaseOwnerCleanupPlan) error {
+	if plan.Mode == ReleaseLeaseOwnerCleanupShortFence && plan.FenceTTL >= workspaceOwnerWaitTimeout {
+		return exit(7, "short release owner fence %s exceeds explicit reuse wait budget %s", plan.FenceTTL, workspaceOwnerWaitTimeout)
 	}
-	if err := owner.Err(); err != nil {
-		return ReleaseLeaseOwnerCleanupAfterProviderRelease, err
-	}
-	mode := releaseLeaseOwnerCleanupMode(backend, lease)
-	switch mode {
-	case ReleaseLeaseOwnerCleanupShortFence:
-		// Retained stop/pause release needs ownership to survive provider teardown,
-		// but only for this owner's normal TTL. A zero duration normalizes to
-		// owner.ttl inside PrepareLeaseRelease.
-		return mode, owner.PrepareLeaseRelease(ctx, 0)
-	case ReleaseLeaseOwnerCleanupGraceFence:
-		// Finish the synchronous grace renewal before the normal 45-second owner can
-		// expire; only then may destructive provider teardown begin.
-		return mode, owner.PrepareLeaseRelease(ctx, workspaceOwnerReleaseGraceTTL)
-	default:
-		return ReleaseLeaseOwnerCleanupAfterProviderRelease, nil
+	return nil
+}
+
+func finalizeReleaseLeaseOwnerCleanupPlan(backend SSHLeaseBackend, lease LeaseTarget, plan ReleaseLeaseOwnerCleanupPlan) {
+	if finalizer, ok := backend.(ReleaseLeaseOwnerCleanupPlanFinalizer); ok {
+		finalizer.FinalizeReleaseLeaseOwnerCleanupPlan(lease, plan)
 	}
 }
 
-func closeWorkspaceOwnerAfterLeaseRelease(ctx context.Context, owner *workspaceOwner, mode ReleaseLeaseOwnerCleanupMode) error {
+func closeWorkspaceOwnerAfterLeaseReleaseFailure(ctx context.Context, owner *workspaceOwner, plan ReleaseLeaseOwnerCleanupPlan) error {
+	if owner == nil || releaseLeaseOwnerCleanupPlanFenced(plan) {
+		return nil
+	}
+	return owner.Close(ctx)
+}
+
+func prepareWorkspaceOwnerForLeaseRelease(ctx context.Context, owner *workspaceOwner, backend SSHLeaseBackend, lease LeaseTarget) (ReleaseLeaseOwnerCleanupPlan, error) {
+	if owner == nil {
+		return ReleaseLeaseOwnerCleanupPlan{Mode: ReleaseLeaseOwnerCleanupAfterProviderRelease}, nil
+	}
+	if err := owner.Err(); err != nil {
+		return ReleaseLeaseOwnerCleanupPlan{Mode: ReleaseLeaseOwnerCleanupAfterProviderRelease}, err
+	}
+	plan, err := releaseLeaseOwnerCleanupPlan(ctx, backend, lease)
+	if err != nil {
+		return plan, err
+	}
+	if err := validateReleaseLeaseOwnerCleanupPlan(plan); err != nil {
+		return plan, err
+	}
+	switch plan.Mode {
+	case ReleaseLeaseOwnerCleanupShortFence:
+		// Retained stop/pause release needs ownership to survive provider teardown,
+		// but only for the bounded provider stop/pause window.
+		return plan, owner.PrepareLeaseRelease(ctx, plan.FenceTTL)
+	case ReleaseLeaseOwnerCleanupGraceFence:
+		// Finish the synchronous grace renewal before the normal 45-second owner can
+		// expire; only then may destructive provider teardown begin.
+		return plan, owner.PrepareLeaseRelease(ctx, plan.FenceTTL)
+	default:
+		return ReleaseLeaseOwnerCleanupPlan{Mode: ReleaseLeaseOwnerCleanupAfterProviderRelease}, nil
+	}
+}
+
+func prepareWorkspaceOwnerForLeaseReleaseOrFinalize(ctx context.Context, owner *workspaceOwner, backend SSHLeaseBackend, lease LeaseTarget) (ReleaseLeaseOwnerCleanupPlan, error) {
+	plan, err := prepareWorkspaceOwnerForLeaseRelease(ctx, owner, backend, lease)
+	if err != nil {
+		finalizeReleaseLeaseOwnerCleanupPlan(backend, lease, plan)
+	}
+	return plan, err
+}
+
+func closeWorkspaceOwnerAfterLeaseRelease(ctx context.Context, owner *workspaceOwner, plan ReleaseLeaseOwnerCleanupPlan) error {
 	if owner == nil {
 		return nil
 	}
-	switch mode {
+	switch plan.Mode {
 	case ReleaseLeaseOwnerCleanupShortFence:
 		return owner.CloseAfterLeaseRelease()
 	case ReleaseLeaseOwnerCleanupGraceFence:
