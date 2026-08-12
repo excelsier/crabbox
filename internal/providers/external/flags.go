@@ -104,11 +104,10 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "external-idempotent-lease-id") {
 		cfg.External.Capabilities.IdempotentLeaseID = *v.IdempotentLeaseID
-		core.MarkExternalCapabilitiesExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "external-release-owner-cleanup") {
 		cfg.External.Capabilities.ReleaseOwnerCleanup = *v.ReleaseOwnerCleanup
-		core.MarkExternalCapabilitiesExplicit(cfg)
+		core.MarkExternalReleaseOwnerCleanupExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "external-command") || core.FlagWasSet(fs, "external-arg") || core.FlagWasSet(fs, "external-config-json") {
 		core.MarkExternalProviderOutputFlagExplicit(cfg)

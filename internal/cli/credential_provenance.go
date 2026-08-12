@@ -26,88 +26,88 @@ const (
 )
 
 type credentialDestinationProvenance struct {
-	coordinator           credentialValueSource
-	coordToken            credentialValueSource
-	coordTokenCommand     credentialValueSource
-	coordAdminToken       credentialValueSource
-	accessClientID        credentialValueSource
-	accessClientSecret    credentialValueSource
-	accessToken           credentialValueSource
-	azSessionsEndpoint    credentialValueSource
-	proxmoxAPIURL         credentialValueSource
-	proxmoxTokenID        credentialValueSource
-	proxmoxTokenSecret    credentialValueSource
-	proxmoxInsecureTLS    credentialValueSource
-	morphAPIURL           credentialValueSource
-	morphAPIKey           credentialValueSource
-	morphSSHGatewayHost   credentialValueSource
-	daytonaAPIURL         credentialValueSource
-	daytonaAPIKey         credentialValueSource
-	daytonaJWTToken       credentialValueSource
-	daytonaSSHGateway     credentialValueSource
-	e2bAPIURL             credentialValueSource
-	e2bDomain             credentialValueSource
-	e2bAPIKey             credentialValueSource
-	cubeSandboxAPIURL     credentialValueSource
-	cubeSandboxDomain     credentialValueSource
-	cubeSandboxProxyNode  credentialValueSource
-	cubeSandboxProxyPort  credentialValueSource
-	cubeSandboxProxyProto credentialValueSource
-	railwayAPIURL         credentialValueSource
-	railwayAPIToken       credentialValueSource
-	fastAPICloudAPIURL    credentialValueSource
-	fastAPICloudToken     credentialValueSource
-	orgoAPIBase           credentialValueSource
-	orgoAPIKey            credentialValueSource
-	unikraftCloudAPIURL   credentialValueSource
-	unikraftCloudAPIKey   credentialValueSource
-	runpodAPIURL          credentialValueSource
-	runpodAPIKey          credentialValueSource
-	vastAPIURL            credentialValueSource
-	vastAPIKey            credentialValueSource
-	isloBaseURL           credentialValueSource
-	isloAPIKey            credentialValueSource
-	tenkiEndpoint         credentialValueSource
-	tenkiGateway          credentialValueSource
-	tensorlakeAPIURL      credentialValueSource
-	tensorlakeAPIKey      credentialValueSource
-	upstashBoxBaseURL     credentialValueSource
-	upstashBoxAPIKey      credentialValueSource
-	smolvmBaseURL         credentialValueSource
-	smolvmAPIKey          credentialValueSource
-	asciiBoxBaseURL       credentialValueSource
-	asciiBoxAPIKey        credentialValueSource
-	cloudflareAPIURL      credentialValueSource
-	cloudflareToken       credentialValueSource
-	nomadAddress          credentialValueSource
-	nomadTokenEnv         credentialValueSource
-	semaphoreHost         credentialValueSource
-	semaphoreToken        credentialValueSource
-	spritesAPIURL         credentialValueSource
-	spritesToken          credentialValueSource
-	parallelsHost         credentialValueSource
-	parallelsHostKey      credentialValueSource
-	staticHost            credentialValueSource
-	sshKey                credentialValueSource
-	exeDevControlHost     credentialValueSource
-	externalConfig        credentialValueSource
-	externalCapabilities  credentialValueSource
-	externalLifecycle     credentialValueSource
-	externalConnection    credentialValueSource
-	externalResource      credentialValueSource
-	externalSSHConnection credentialValueSource
-	externalSSHHost       credentialValueSource
-	externalSSHProxy      credentialValueSource
-	externalSSHAllowEnv   credentialValueSource
-	externalSSHOutput     credentialValueSource
-	externalDesktopUser   credentialValueSource
-	externalDesktopEnv    credentialValueSource
-	externalDesktopTarget credentialValueSource
-	externalDesktopMode   credentialValueSource
-	externalRouting       credentialValueSource
-	externalApproved      externalCredentialApproval
-	externalArgvApproval  externalLifecycleCredentialApproval
-	repositoryRoot        string
+	coordinator                 credentialValueSource
+	coordToken                  credentialValueSource
+	coordTokenCommand           credentialValueSource
+	coordAdminToken             credentialValueSource
+	accessClientID              credentialValueSource
+	accessClientSecret          credentialValueSource
+	accessToken                 credentialValueSource
+	azSessionsEndpoint          credentialValueSource
+	proxmoxAPIURL               credentialValueSource
+	proxmoxTokenID              credentialValueSource
+	proxmoxTokenSecret          credentialValueSource
+	proxmoxInsecureTLS          credentialValueSource
+	morphAPIURL                 credentialValueSource
+	morphAPIKey                 credentialValueSource
+	morphSSHGatewayHost         credentialValueSource
+	daytonaAPIURL               credentialValueSource
+	daytonaAPIKey               credentialValueSource
+	daytonaJWTToken             credentialValueSource
+	daytonaSSHGateway           credentialValueSource
+	e2bAPIURL                   credentialValueSource
+	e2bDomain                   credentialValueSource
+	e2bAPIKey                   credentialValueSource
+	cubeSandboxAPIURL           credentialValueSource
+	cubeSandboxDomain           credentialValueSource
+	cubeSandboxProxyNode        credentialValueSource
+	cubeSandboxProxyPort        credentialValueSource
+	cubeSandboxProxyProto       credentialValueSource
+	railwayAPIURL               credentialValueSource
+	railwayAPIToken             credentialValueSource
+	fastAPICloudAPIURL          credentialValueSource
+	fastAPICloudToken           credentialValueSource
+	orgoAPIBase                 credentialValueSource
+	orgoAPIKey                  credentialValueSource
+	unikraftCloudAPIURL         credentialValueSource
+	unikraftCloudAPIKey         credentialValueSource
+	runpodAPIURL                credentialValueSource
+	runpodAPIKey                credentialValueSource
+	vastAPIURL                  credentialValueSource
+	vastAPIKey                  credentialValueSource
+	isloBaseURL                 credentialValueSource
+	isloAPIKey                  credentialValueSource
+	tenkiEndpoint               credentialValueSource
+	tenkiGateway                credentialValueSource
+	tensorlakeAPIURL            credentialValueSource
+	tensorlakeAPIKey            credentialValueSource
+	upstashBoxBaseURL           credentialValueSource
+	upstashBoxAPIKey            credentialValueSource
+	smolvmBaseURL               credentialValueSource
+	smolvmAPIKey                credentialValueSource
+	asciiBoxBaseURL             credentialValueSource
+	asciiBoxAPIKey              credentialValueSource
+	cloudflareAPIURL            credentialValueSource
+	cloudflareToken             credentialValueSource
+	nomadAddress                credentialValueSource
+	nomadTokenEnv               credentialValueSource
+	semaphoreHost               credentialValueSource
+	semaphoreToken              credentialValueSource
+	spritesAPIURL               credentialValueSource
+	spritesToken                credentialValueSource
+	parallelsHost               credentialValueSource
+	parallelsHostKey            credentialValueSource
+	staticHost                  credentialValueSource
+	sshKey                      credentialValueSource
+	exeDevControlHost           credentialValueSource
+	externalConfig              credentialValueSource
+	externalLifecycle           credentialValueSource
+	externalReleaseOwnerCleanup credentialValueSource
+	externalConnection          credentialValueSource
+	externalResource            credentialValueSource
+	externalSSHConnection       credentialValueSource
+	externalSSHHost             credentialValueSource
+	externalSSHProxy            credentialValueSource
+	externalSSHAllowEnv         credentialValueSource
+	externalSSHOutput           credentialValueSource
+	externalDesktopUser         credentialValueSource
+	externalDesktopEnv          credentialValueSource
+	externalDesktopTarget       credentialValueSource
+	externalDesktopMode         credentialValueSource
+	externalRouting             credentialValueSource
+	externalApproved            externalCredentialApproval
+	externalArgvApproval        externalLifecycleCredentialApproval
+	repositoryRoot              string
 }
 
 type externalCredentialApproval struct {
@@ -679,7 +679,7 @@ func ValidateExternalReleaseOwnerCleanup(cfg Config) error {
 	if mode == "" || mode == "grace-fence" {
 		return nil
 	}
-	if cfg.credentialProvenance.externalCapabilities == credentialSourceRepository {
+	if cfg.credentialProvenance.externalReleaseOwnerCleanup == credentialSourceRepository {
 		return repositoryCredentialDestinationError("external", "external.capabilities.releaseOwnerCleanup", "the same adapter cleanup contract in trusted user config, an environment variable, or a flag")
 	}
 	return nil
@@ -819,7 +819,9 @@ func MarkExternalRoutingCredentialSources(cfg *Config) {
 	connection := cfg.External.Connection
 	provenance := &cfg.credentialProvenance
 	provenance.externalConfig = source
-	provenance.externalCapabilities = source
+	if cfg.External.Capabilities.ReleaseOwnerCleanup != "" {
+		provenance.externalReleaseOwnerCleanup = source
+	}
 	provenance.externalLifecycle = source
 	provenance.externalConnection = source
 	provenance.externalResource = credentialDestinationSource(connection.ResourceName, provenance.externalApproved.resource, source)
@@ -904,11 +906,11 @@ func MarkExternalProviderOutputFlagExplicit(cfg *Config) {
 	markExternalProviderOutputExplicit(cfg, credentialSourceFlag)
 }
 
-// MarkExternalCapabilitiesExplicit records that an operator selected the
-// external adapter capability contract through a trusted flag.
-func MarkExternalCapabilitiesExplicit(cfg *Config) {
+// MarkExternalReleaseOwnerCleanupExplicit records that an operator selected
+// the external adapter owner-cleanup contract through a trusted flag.
+func MarkExternalReleaseOwnerCleanupExplicit(cfg *Config) {
 	if cfg != nil {
-		cfg.credentialProvenance.externalCapabilities = credentialSourceFlag
+		cfg.credentialProvenance.externalReleaseOwnerCleanup = credentialSourceFlag
 	}
 }
 

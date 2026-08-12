@@ -2292,6 +2292,36 @@ func TestConfigMergeTracksSSHDestinationSources(t *testing.T) {
 		if err := ValidateExternalReleaseOwnerCleanup(cfg); err == nil || !strings.Contains(err.Error(), "external.capabilities.releaseOwnerCleanup") {
 			t.Fatalf("repository release owner cleanup downgrade error=%v", err)
 		}
+
+		idempotentFlag := cfg
+		idempotentFlag.External.Capabilities.IdempotentLeaseID = true
+		if err := ValidateExternalReleaseOwnerCleanup(idempotentFlag); err == nil || !strings.Contains(err.Error(), "external.capabilities.releaseOwnerCleanup") {
+			t.Fatalf("idempotent flag laundered repository cleanup downgrade: %v", err)
+		}
+
+		idempotentEnv := cfg
+		t.Setenv("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID", "true")
+		if err := applyEnv(&idempotentEnv); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateExternalReleaseOwnerCleanup(idempotentEnv); err == nil || !strings.Contains(err.Error(), "external.capabilities.releaseOwnerCleanup") {
+			t.Fatalf("idempotent env laundered repository cleanup downgrade: %v", err)
+		}
+
+		explicitFlag := cfg
+		MarkExternalReleaseOwnerCleanupExplicit(&explicitFlag)
+		if err := ValidateExternalReleaseOwnerCleanup(explicitFlag); err != nil {
+			t.Fatalf("explicit cleanup flag rejected: %v", err)
+		}
+
+		explicitEnv := cfg
+		t.Setenv("CRABBOX_EXTERNAL_RELEASE_OWNER_CLEANUP", "after-provider-release")
+		if err := applyEnv(&explicitEnv); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateExternalReleaseOwnerCleanup(explicitEnv); err != nil {
+			t.Fatalf("explicit cleanup env rejected: %v", err)
+		}
 	})
 
 	t.Run("trusted external provider output rejects unencodable contract", func(t *testing.T) {
