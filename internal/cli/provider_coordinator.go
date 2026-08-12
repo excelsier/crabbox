@@ -50,8 +50,7 @@ func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget,
 }
 
 func (b *coordinatorLeaseBackend) ReleaseLeaseNeedsOwnerGraceFence(lease LeaseTarget) bool {
-	policy, ok := b.direct.(ReleaseLeaseOwnerGraceFencePolicy)
-	return ok && policy.ReleaseLeaseNeedsOwnerGraceFence(lease)
+	return true
 }
 
 func (b *coordinatorLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {

@@ -3,8 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -589,58 +592,88 @@ func TestWorkspaceOwnerUnclassifiedRunCleanupUsesLegacyRemoteClose(t *testing.T)
 	}
 }
 
-func TestWorkspaceOwnerCoordinatorForwardsReleaseGraceFencePolicy(t *testing.T) {
-	t.Run("destructive direct backend", func(t *testing.T) {
-		remote := newFakeWorkspaceOwnerRemote()
-		owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_coord_destructive_cleanup", &bytes.Buffer{}, remote, time.Second, 60*time.Millisecond, 10*time.Millisecond)
-		if err != nil {
-			t.Fatal(err)
-		}
-		backend := &coordinatorLeaseBackend{direct: destructiveGraceReleaseTestBackend{}}
-		closeAfterOnly, err := prepareWorkspaceOwnerForLeaseRelease(context.Background(), owner, backend, LeaseTarget{LeaseID: "cbx_coord_destructive_cleanup"})
-		if err != nil {
-			t.Fatalf("prepare coordinator destructive cleanup: %v", err)
-		}
-		if !closeAfterOnly {
-			t.Fatal("coordinator wrapper did not forward destructive release grace policy")
-		}
-		if err := closeWorkspaceOwnerAfterLeaseRelease(context.Background(), owner, closeAfterOnly); err != nil {
-			t.Fatalf("close coordinator destructive owner after release: %v", err)
-		}
-		_, err = acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_coord_destructive_cleanup", &bytes.Buffer{}, remote, 120*time.Millisecond, 60*time.Millisecond, 10*time.Millisecond)
-		if err == nil {
-			t.Fatal("coordinator destructive cleanup released remote owner instead of retaining grace fence")
-		}
-		if !strings.Contains(err.Error(), "timed out") {
-			t.Fatalf("coordinator destructive reacquire err=%v, want timeout while grace fence remains", err)
-		}
-	})
+func TestWorkspaceOwnerCoordinatorReleaseDeletePathUsesGraceFence(t *testing.T) {
+	remote := newFakeWorkspaceOwnerRemote()
+	leaseID := "cbx_coord_delete_cleanup"
+	owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, leaseID, &bytes.Buffer{}, remote, time.Second, 60*time.Millisecond, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	t.Run("unclassified direct backend", func(t *testing.T) {
-		remote := newFakeWorkspaceOwnerRemote()
-		owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_coord_unclassified_cleanup", &bytes.Buffer{}, remote, time.Second, 80*time.Millisecond, 10*time.Millisecond)
-		if err != nil {
-			t.Fatal(err)
+	releaseCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/"+leaseID+"/release" {
+			http.NotFound(w, r)
+			return
 		}
-		backend := &coordinatorLeaseBackend{direct: testSSHBackend{}}
-		closeAfterOnly, err := prepareWorkspaceOwnerForLeaseRelease(context.Background(), owner, backend, LeaseTarget{LeaseID: "cbx_coord_unclassified_cleanup"})
-		if err != nil {
-			t.Fatalf("prepare coordinator unclassified cleanup: %v", err)
+		releaseCalled = true
+		var body struct {
+			Delete bool `json:"delete"`
 		}
-		if closeAfterOnly {
-			t.Fatal("coordinator wrapper invented release grace policy for unclassified direct backend")
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode coordinator release body: %v", err)
 		}
-		if err := closeWorkspaceOwnerAfterLeaseRelease(context.Background(), owner, closeAfterOnly); err != nil {
-			t.Fatalf("close coordinator unclassified owner after release: %v", err)
+		if !body.Delete {
+			t.Fatal("coordinator release did not request destructive delete=true")
 		}
-		next, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_coord_unclassified_cleanup", &bytes.Buffer{}, remote, 100*time.Millisecond, 80*time.Millisecond, 10*time.Millisecond)
-		if err != nil {
-			t.Fatalf("coordinator unclassified cleanup did not release remote owner promptly: %v", err)
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: leaseID, Provider: "aws", State: "released"}})
+	}))
+	defer server.Close()
+
+	cfg := Config{Coordinator: server.URL, CoordToken: "user-token"}
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, direct: testSSHBackend{}}
+	closeAfterOnly, err := prepareWorkspaceOwnerForLeaseRelease(context.Background(), owner, backend, LeaseTarget{LeaseID: leaseID})
+	if err != nil {
+		t.Fatalf("prepare coordinator cleanup: %v", err)
+	}
+	if !closeAfterOnly {
+		t.Fatal("coordinator cleanup did not use release grace fence")
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}}); err != nil {
+		t.Fatalf("coordinator release: %v", err)
+	}
+	if !releaseCalled {
+		t.Fatal("coordinator release endpoint was not called")
+	}
+	if err := closeWorkspaceOwnerAfterLeaseRelease(context.Background(), owner, closeAfterOnly); err != nil {
+		t.Fatalf("close coordinator owner after release: %v", err)
+	}
+	_, err = acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, leaseID, &bytes.Buffer{}, remote, 120*time.Millisecond, 60*time.Millisecond, 10*time.Millisecond)
+	if err == nil {
+		t.Fatal("coordinator destructive cleanup released remote owner instead of retaining grace fence")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("coordinator destructive reacquire err=%v, want timeout while grace fence remains", err)
+	}
+}
+
+func TestWorkspaceOwnerCoordinatorGraceFenceProviderSpecBoundary(t *testing.T) {
+	for _, spec := range []ProviderSpec{
+		(testStaticSSHProvider{}).Spec(),
+		(testNamespaceProvider{}).Spec(),
+	} {
+		if spec.Coordinator != CoordinatorNever {
+			t.Fatalf("%s coordinator mode=%s, want never", spec.Name, spec.Coordinator)
 		}
-		if err := next.Close(context.Background()); err != nil {
-			t.Fatalf("release reacquired owner: %v", err)
+	}
+	for _, spec := range []ProviderSpec{
+		(testAWSProvider{}).Spec(),
+		(testAzureProvider{}).Spec(),
+		(testGCPProvider{}).Spec(),
+		(testHetznerProvider{}).Spec(),
+		(testDaytonaProvider{}).Spec(),
+	} {
+		if spec.Coordinator != CoordinatorSupported {
+			t.Fatalf("%s coordinator mode=%s, want supported", spec.Name, spec.Coordinator)
 		}
-	})
+	}
+	if !releaseLeaseNeedsOwnerGraceFence(&coordinatorLeaseBackend{direct: testSSHBackend{}}, LeaseTarget{LeaseID: "cbx_coord_boundary"}) {
+		t.Fatal("coordinator wrapper must fence releases independent of direct provider policy")
+	}
 }
 
 func TestWorkspaceOwnerDestructiveRunCleanupKeepsGraceFence(t *testing.T) {
