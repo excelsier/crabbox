@@ -2016,16 +2016,19 @@ esac
     assert.match(result.stdout, /crabbox-live-ok/);
     assert.match(calls, /^run --provider apple-container --id apple-container-smoke-test /m);
     assert.equal((calls.match(/^stop --provider apple-container apple-container-smoke-test$/gm) ?? []).length, 1);
+    assert.doesNotMatch(calls, /^history(?: |$)/m);
   }
 
-  const { result: malformed, calls } = smoke(JSON.stringify("not-a-cache-report"));
-  assert.notEqual(malformed.status, 0, malformed.stdout + malformed.stderr);
-  assert.match(malformed.stderr, /cache stats must be null, an array, or an object/);
-  assert.match(calls, /^warmup --provider apple-container --ttl 15m --idle-timeout 5m$/m);
-  assert.match(calls, /^cache stats --id apple-container-smoke-test --json$/m);
-  assert.doesNotMatch(calls, /^run --provider apple-container /m);
-  assert.equal((calls.match(/^stop --provider apple-container apple-container-smoke-test$/gm) ?? []).length, 1);
-  assert.doesNotMatch(calls, /^history(?: |$)/m);
+  for (const cacheStats of [JSON.stringify("not-a-cache-report"), JSON.stringify(42), JSON.stringify(true)]) {
+    const { result: malformed, calls } = smoke(cacheStats);
+    assert.notEqual(malformed.status, 0, malformed.stdout + malformed.stderr);
+    assert.match(malformed.stderr, /cache stats must be null, an array, or an object/);
+    assert.match(calls, /^warmup --provider apple-container --ttl 15m --idle-timeout 5m$/m);
+    assert.match(calls, /^cache stats --id apple-container-smoke-test --json$/m);
+    assert.doesNotMatch(calls, /^run --provider apple-container /m);
+    assert.equal((calls.match(/^stop --provider apple-container apple-container-smoke-test$/gm) ?? []).length, 1);
+    assert.doesNotMatch(calls, /^history(?: |$)/m);
+  }
 });
 
 test("local-container live smoke uses the generic SSH lease lifecycle", () => {
