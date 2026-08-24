@@ -6,6 +6,10 @@
 
 - Added explicitly opt-in, image-pinned typed ready pools with exact repository/cache identities and rollback-isolated coordinator storage. Thanks @vincentkoc.
 
+### Fixed
+
+- Cleaned exact-owned interrupted Azure public-IP and NIC provisioning prefixes while restoring ordered SKU fallback and preserving immutable-identity cleanup fences. Thanks @excelsier and @vincentkoc.
+
 ## 0.46.1 - 2026-08-24
 
 ### Added

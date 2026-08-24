@@ -1180,7 +1180,9 @@ export class AzureClient {
       Boolean(vm || nic || pip || initialDisk) &&
       (vm
         ? !nic || !pip || (!initialDisk && !azureVMUsesEphemeralOSDisk(vm))
-        : Boolean(initialDisk && (!nic || !pip)));
+        : initialDisk
+          ? !nic || !pip
+          : Boolean(nic && !pip));
 
     const expectedNICID = this.resourceID(nicResourcePath);
     const expectedPIPID = this.resourceID(pipResourcePath);
