@@ -866,8 +866,10 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: {
+            vmId: "vm-immutable-id",
             networkProfile: {
               networkInterfaces: [
                 {
@@ -889,8 +891,10 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-nic",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: {
+            resourceGuid: "nic-immutable-id",
             ipConfigurations: [
               {
                 id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic/ipConfigurations/ipconfig1",
@@ -908,8 +912,10 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-pip",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: {
+            resourceGuid: "pip-immutable-id",
             ipConfiguration: {
               id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic/ipConfigurations/ipconfig1",
             },
@@ -920,6 +926,7 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-osdisk",
+          location: "eastus",
           managedBy:
             "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster",
           tags: ownedAzureTags(),
@@ -1046,8 +1053,10 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-nic",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: {
+            resourceGuid: "nic-immutable-id",
             ipConfigurations: [
               {
                 id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic/ipConfigurations/ipconfig1",
@@ -1065,8 +1074,10 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-pip",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: {
+            resourceGuid: "pip-immutable-id",
             ipConfiguration: {
               id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic/ipConfigurations/ipconfig1",
             },
@@ -1077,6 +1088,7 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-osdisk",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: { uniqueId: "disk-unique-id" },
         });
@@ -1090,6 +1102,215 @@ describe("azure provider", () => {
       "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
       "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
     ]);
+  });
+
+  it("cleans an exact Azure NIC and public IP set before VM creation", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const deleted = new Set<string>();
+    const deletes: string[] = [];
+    const nicID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic";
+    const pipID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip";
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        deleted.add(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (deleted.has(url.pathname)) return azureResourceNotFoundResponse(url);
+      if (url.pathname === nicID) {
+        return Response.json({
+          id: nicID,
+          name: "crabbox-blue-lobster-nic",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: {
+            resourceGuid: "nic-immutable-id",
+            ipConfigurations: [
+              {
+                id: `${nicID}/ipConfigurations/ipconfig1`,
+                properties: { publicIPAddress: { id: pipID } },
+              },
+            ],
+          },
+        });
+      }
+      if (url.pathname === pipID) {
+        return Response.json({
+          id: pipID,
+          name: "crabbox-blue-lobster-pip",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: {
+            resourceGuid: "pip-immutable-id",
+            ipConfiguration: { id: `${nicID}/ipConfigurations/ipconfig1` },
+          },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
+    expect(deletes).toEqual([nicID, pipID]);
+  });
+
+  it("cleans an exact Azure public IP left before NIC creation", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const deleted = new Set<string>();
+    const deletes: string[] = [];
+    const pipID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip";
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        deleted.add(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (deleted.has(url.pathname)) return azureResourceNotFoundResponse(url);
+      if (url.pathname === pipID) {
+        return Response.json({
+          id: pipID,
+          name: "crabbox-blue-lobster-pip",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: { resourceGuid: "pip-immutable-id" },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
+    expect(deletes).toEqual([pipID]);
+  });
+
+  it("cleans an exact Azure network interface left before public IP creation", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const deleted = new Set<string>();
+    const deletes: string[] = [];
+    const nicID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic";
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        deleted.add(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (deleted.has(url.pathname)) return azureResourceNotFoundResponse(url);
+      if (url.pathname === nicID) {
+        return Response.json({
+          id: nicID,
+          name: "crabbox-blue-lobster-nic",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: {
+            resourceGuid: "nic-immutable-id",
+            ipConfigurations: [],
+          },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
+    expect(deletes).toEqual([nicID]);
+  });
+
+  it.each([
+    ["public IP resourceGuid", "pip-guid"],
+    ["public IP location", "pip-location"],
+    ["network interface resourceGuid", "nic-guid"],
+    ["network interface location", "nic-location"],
+  ] as const)("refuses Azure network cleanup without stable %s", async (_label, missing) => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const deletes: string[] = [];
+    const nicID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic";
+    const pipID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip";
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname === nicID) {
+        return Response.json({
+          id: nicID,
+          name: "crabbox-blue-lobster-nic",
+          ...(missing === "nic-location" ? {} : { location: "eastus" }),
+          tags: ownedAzureTags(),
+          properties: {
+            ...(missing === "nic-guid" ? {} : { resourceGuid: "nic-immutable-id" }),
+            ipConfigurations: [
+              {
+                id: `${nicID}/ipConfigurations/ipconfig1`,
+                properties: { publicIPAddress: { id: pipID } },
+              },
+            ],
+          },
+        });
+      }
+      if (url.pathname === pipID) {
+        return Response.json({
+          id: pipID,
+          name: "crabbox-blue-lobster-pip",
+          ...(missing === "pip-location" ? {} : { location: "eastus" }),
+          tags: ownedAzureTags(),
+          properties: {
+            ...(missing === "pip-guid" ? {} : { resourceGuid: "pip-immutable-id" }),
+            ipConfiguration: { id: `${nicID}/ipConfigurations/ipconfig1` },
+          },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).rejects.toThrow(
+      "stable resource identity is incomplete",
+    );
+    expect(deletes).toEqual([]);
+  });
+
+  it("refuses a same-name Azure public IP replacement without stable identity before delete", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const deletes: string[] = [];
+    const pipID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip";
+    let reads = 0;
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname === pipID) {
+        reads += 1;
+        return Response.json({
+          id: pipID,
+          name: "crabbox-blue-lobster-pip",
+          tags: ownedAzureTags(),
+          properties: {
+            ipAddress: reads === 1 ? "203.0.113.10" : "203.0.113.11",
+          },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).rejects.toThrow(
+      "stable resource identity is incomplete",
+    );
+    expect(reads).toBe(1);
+    expect(deletes).toEqual([]);
   });
 
   it("releases a VM with an ephemeral OS disk and no managed disk resource", async () => {
@@ -1863,9 +2084,11 @@ describe("azure provider", () => {
         const name = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
         const isVM = url.pathname.includes("/virtualMachines/");
         const isNIC = url.pathname.includes("/networkInterfaces/");
+        const isPIP = url.pathname.includes("/publicIPAddresses/");
         const isDisk = url.pathname.includes("/disks/");
         const properties = isVM
           ? {
+              vmId: "vm-immutable-id",
               networkProfile: {
                 networkInterfaces: [
                   {
@@ -1883,6 +2106,7 @@ describe("azure provider", () => {
             }
           : isNIC
             ? {
+                resourceGuid: "nic-immutable-id",
                 virtualMachine: {
                   id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster",
                 },
@@ -1896,12 +2120,15 @@ describe("azure provider", () => {
                   },
                 ],
               }
-            : isDisk
-              ? { uniqueId: "disk-unique-id" }
-              : {};
+            : isPIP
+              ? { resourceGuid: "pip-immutable-id" }
+              : isDisk
+                ? { uniqueId: "disk-unique-id" }
+                : {};
         return Response.json({
           id: url.pathname,
           name,
+          location: "eastus",
           managedBy:
             isDisk &&
             !deleted.has(
@@ -2392,6 +2619,7 @@ describe("azure provider", () => {
         : undefined;
       const properties = url.pathname.includes("/virtualMachines/")
         ? {
+            vmId: "vm-immutable-id",
             networkProfile: {
               networkInterfaces: [
                 {
@@ -2409,6 +2637,7 @@ describe("azure provider", () => {
           }
         : url.pathname.includes("/networkInterfaces/")
           ? {
+              resourceGuid: "nic-immutable-id",
               ipConfigurations: [
                 {
                   properties: {
@@ -2419,10 +2648,19 @@ describe("azure provider", () => {
                 },
               ],
             }
-          : url.pathname.includes("/disks/")
-            ? { uniqueId: "disk-unique-id" }
-            : {};
-      return Response.json({ id: url.pathname, name, managedBy, tags, properties });
+          : url.pathname.includes("/publicIPAddresses/")
+            ? { resourceGuid: "pip-immutable-id" }
+            : url.pathname.includes("/disks/")
+              ? { uniqueId: "disk-unique-id" }
+              : {};
+      return Response.json({
+        id: url.pathname,
+        name,
+        location: "eastus",
+        managedBy,
+        tags,
+        properties,
+      });
     };
 
     await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
@@ -2541,6 +2779,7 @@ describe("azure provider", () => {
       const isDisk = url.pathname.includes("/disks/");
       const properties = url.pathname.includes("/virtualMachines/")
         ? {
+            vmId: "vm-immutable-id",
             networkProfile: {
               networkInterfaces: [
                 {
@@ -2558,6 +2797,7 @@ describe("azure provider", () => {
           }
         : url.pathname.includes("/networkInterfaces/")
           ? {
+              resourceGuid: "nic-immutable-id",
               ipConfigurations: [
                 {
                   properties: {
@@ -2568,12 +2808,15 @@ describe("azure provider", () => {
                 },
               ],
             }
-          : isDisk
-            ? { uniqueId: "disk-unique-id" }
-            : {};
+          : url.pathname.includes("/publicIPAddresses/")
+            ? { resourceGuid: "pip-immutable-id" }
+            : isDisk
+              ? { uniqueId: "disk-unique-id" }
+              : {};
       return Response.json({
         id: url.pathname,
         name,
+        location: "eastus",
         managedBy: isDisk
           ? "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster"
           : undefined,
@@ -2612,6 +2855,7 @@ describe("azure provider", () => {
       const isDisk = url.pathname.includes("/disks/");
       const properties = url.pathname.includes("/virtualMachines/")
         ? {
+            vmId: "vm-immutable-id",
             networkProfile: {
               networkInterfaces: [
                 {
@@ -2629,6 +2873,7 @@ describe("azure provider", () => {
           }
         : url.pathname.includes("/networkInterfaces/")
           ? {
+              resourceGuid: "nic-immutable-id",
               ipConfigurations: [
                 {
                   properties: {
@@ -2639,12 +2884,15 @@ describe("azure provider", () => {
                 },
               ],
             }
-          : isDisk
-            ? { uniqueId: "disk-unique-id" }
-            : {};
+          : url.pathname.includes("/publicIPAddresses/")
+            ? { resourceGuid: "pip-immutable-id" }
+            : isDisk
+              ? { uniqueId: "disk-unique-id" }
+              : {};
       return Response.json({
         id: url.pathname,
         name,
+        location: "eastus",
         managedBy: isDisk
           ? "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster"
           : undefined,

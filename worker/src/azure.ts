@@ -1178,7 +1178,9 @@ export class AzureClient {
       options.prepareClaim &&
       !options.claim &&
       Boolean(vm || nic || pip || initialDisk) &&
-      (!nic || !pip || (!initialDisk && !azureVMUsesEphemeralOSDisk(vm)));
+      (vm
+        ? !nic || !pip || (!initialDisk && !azureVMUsesEphemeralOSDisk(vm))
+        : Boolean(initialDisk && (!nic || !pip)));
 
     const expectedNICID = this.resourceID(nicResourcePath);
     const expectedPIPID = this.resourceID(pipResourcePath);
@@ -1426,6 +1428,14 @@ export class AzureClient {
     if (initialClaimSetIncomplete) {
       throw new Error(
         `refusing to delete Azure resources for ${name}: canonical companion set is incomplete`,
+      );
+    }
+    if (
+      options.prepareClaim &&
+      currentResources.some((resource) => !azureReconciliationMemberHasStableIdentity(resource))
+    ) {
+      throw new Error(
+        `refusing to delete Azure resources for ${name}: stable resource identity is incomplete`,
       );
     }
 
