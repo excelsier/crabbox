@@ -116,6 +116,8 @@ func (b *backend) AcquireIsExclusiveOneShot() bool { return true }
 
 func (b *backend) SupportsRequestedLeaseID() bool { return true }
 
+func (b *backend) SupportsRequestedCheckpointID() bool { return true }
+
 func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailureEvidenceRequest) (core.RunFailureEvidenceCollector, error) {
 	containerID := strings.TrimSpace(req.Lease.Server.CloudID)
 	if containerID == "" {
@@ -601,18 +603,18 @@ func (b *backend) reconcileChangedClaim(lease core.LeaseTarget, bootstrapDir str
 				}
 			}
 		}
-		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
+		if bootstrapDir != "" {
 			winningBootstrapDir := ""
 			if exists {
 				winningBootstrapDir = strings.TrimSpace(claim.Labels["bootstrap_dir"])
 			}
 			if bootstrapDir != winningBootstrapDir {
-				if err := b.removeAll(bootstrapDir); err != nil {
-					cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
+				if err := b.removeBootstrapDir(bootstrapDir); err != nil {
+					cleanupErrs = append(cleanupErrs, err)
 				}
 			}
 		}
-		if !exists {
+		if !exists && len(cleanupErrs) == 0 {
 			core.RemoveStoredTestboxKey(lease.LeaseID)
 		}
 		return errors.Join(cleanupErrs...)
@@ -653,19 +655,9 @@ func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.Leas
 		if err := b.removeContainer(rollbackCtx, lease.Server.CloudID); err != nil {
 			return err
 		}
-		var cleanupErrs []error
-		if hostRoot := hostLeaseWorkRoot(lease); hostRoot != "" {
-			if err := b.removeAll(hostRoot); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostRoot, err))
-			}
-		}
-		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-			if err := b.removeAll(bootstrapDir); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
-			}
-		}
-		core.RemoveStoredTestboxKey(lease.LeaseID)
-		return errors.Join(cleanupErrs...)
+		labels := cloneLabels(lease.Server.Labels)
+		labels["bootstrap_dir"] = bootstrapDir
+		return b.cleanupContainerSidecars(lease.LeaseID, labels, true)
 	})
 	if b.afterClaimCleanup != nil {
 		b.afterClaimCleanup(lease.LeaseID)
@@ -983,25 +975,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"]) != "" && !fixedLocalContainerLeaseKind.IsFixedClaim(claim) {
 		return core.Exit(4, "lease_id_conflict: refusing to release fixed local-container lease %s without its durable create intent", lease.LeaseID)
 	}
-	hostLeaseRoot := hostLeaseWorkRoot(lease)
-	bootstrapDir := strings.TrimSpace(lease.Server.Labels["bootstrap_dir"])
 	err = fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
 		if err := b.removeContainer(ctx, id); err != nil {
 			return err
 		}
-		var cleanupErrs []error
-		if hostLeaseRoot != "" {
-			if err := b.removeAll(hostLeaseRoot); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostLeaseRoot, err))
-			}
-		}
-		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-			if err := b.removeAll(bootstrapDir); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
-			}
-		}
-		core.RemoveStoredTestboxKey(lease.LeaseID)
-		return errors.Join(cleanupErrs...)
+		return b.cleanupContainerSidecars(lease.LeaseID, lease.Server.Labels, true)
 	})
 	if b.afterClaimCleanup != nil {
 		b.afterClaimCleanup(lease.LeaseID)
@@ -1105,19 +1083,7 @@ func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarge
 		if !absent {
 			return core.Exit(4, "local-container %s still exists; refusing to remove its claim", shortID(claim.CloudID))
 		}
-		var cleanupErrs []error
-		if hostRoot := hostLeaseWorkRoot(core.LeaseTarget{LeaseID: leaseID, Server: core.Server{Labels: claim.Labels}}); hostRoot != "" {
-			if err := b.removeAll(hostRoot); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostRoot, err))
-			}
-		}
-		if bootstrapDir := strings.TrimSpace(claim.Labels["bootstrap_dir"]); bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-			if err := b.removeAll(bootstrapDir); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
-			}
-		}
-		core.RemoveStoredTestboxKey(leaseID)
-		return errors.Join(cleanupErrs...)
+		return b.cleanupContainerSidecars(leaseID, claim.Labels, true)
 	})
 	if b.afterClaimCleanup != nil {
 		b.afterClaimCleanup(leaseID)
@@ -1397,6 +1363,12 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		// Remove the orphan claim only if it is unchanged since our pre-container
 		// snapshot; a concurrent Acquire/Touch that (re)bound this lease makes it no
 		// longer an orphan, so the guard declines and the live lease survives.
+		if dir := strings.TrimSpace(claim.Labels["bootstrap_dir"]); dir != "" {
+			if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=bootstrap-cleanup-pending path=%s; retry stop with the original cache settings\n", claim.LeaseID, blank(claim.Slug, "-"), dir)
+				continue
+			}
+		}
 		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
 			continue
@@ -1553,10 +1525,8 @@ func (b *backend) cleanupContainerSidecars(leaseID string, labels map[string]str
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostRoot, err))
 		}
 	}
-	if bootstrapDir := strings.TrimSpace(labels["bootstrap_dir"]); bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-		if err := b.removeAll(bootstrapDir); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
-		}
+	if err := b.removeBootstrapDir(strings.TrimSpace(labels["bootstrap_dir"])); err != nil {
+		cleanupErrs = append(cleanupErrs, err)
 	}
 	if len(cleanupErrs) != 0 {
 		return errors.Join(cleanupErrs...)
@@ -1835,7 +1805,11 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	for _, vol := range cfg.LocalContainer.Volumes {
 		args = append(args, "-v", vol)
 	}
-	bootstrapDir, err := os.MkdirTemp("", "crabbox-bootstrap-*")
+	bootstrapRoot := localContainerBootstrapRoot()
+	if err := os.MkdirAll(bootstrapRoot, 0o700); err != nil {
+		return "", "", core.Exit(2, "create local-container bootstrap root %s: %v", bootstrapRoot, err)
+	}
+	bootstrapDir, err := os.MkdirTemp(bootstrapRoot, "crabbox-bootstrap-*")
 	if err != nil {
 		return "", "", core.Exit(2, "create bootstrap script directory: %v", err)
 	}
@@ -2695,6 +2669,22 @@ func safeLocalContainerLeaseID(leaseID string) bool {
 	return true
 }
 
+func (b *backend) removeBootstrapDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if !trustedBootstrapDir(dir) {
+		if _, err := os.Lstat(dir); os.IsNotExist(err) {
+			return nil
+		}
+		return core.Exit(2, "local-container bootstrap directory %s is outside the current cache/temp roots; restore the original cache settings or remove the verified residue explicitly, then retry stop", dir)
+	}
+	if err := b.removeAll(dir); err != nil {
+		return fmt.Errorf("remove local-container bootstrap directory %s: %w", dir, err)
+	}
+	return nil
+}
+
 func trustedBootstrapDir(dir string) bool {
 	dir = filepath.Clean(dir)
 	if !filepath.IsAbs(dir) {
@@ -2705,7 +2695,15 @@ func trustedBootstrapDir(dir string) bool {
 		return false
 	}
 	parent := filepath.Dir(dir)
-	return parent == filepath.Clean(os.TempDir())
+	return parent == filepath.Clean(localContainerBootstrapRoot()) || parent == filepath.Clean(os.TempDir())
+}
+
+func localContainerBootstrapRoot() string {
+	if cache, err := os.UserCacheDir(); err == nil && strings.TrimSpace(cache) != "" {
+		// Default user caches are normally VM-shared; custom caches must be mounted.
+		return filepath.Join(cache, "crabbox", "local-container-bootstrap")
+	}
+	return os.TempDir()
 }
 
 func trustedLocalContainerWorkRoot(root string) bool {
@@ -2959,6 +2957,69 @@ install_verified_apt_keyring() {
 }
 `
 
+const localContainerBrowserInstallScript = `
+if [ "${CRABBOX_BROWSER:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
+  has_working_browser() {
+    for candidate in google-chrome chromium firefox-esr firefox; do
+      if candidate_path="$(command -v "$candidate" 2>/dev/null)" && "$candidate_path" --version >/dev/null 2>&1; then
+        return 0
+      fi
+    done
+    return 1
+  }
+  browser_install_failed() {
+    echo "local-container $1; use a prebuilt image with a working browser or a supported Debian image" >&2
+    exit 127
+  }
+  if ! has_working_browser; then
+    apt-get update
+    ID=""
+    if [ -r /etc/os-release ]; then . /etc/os-release; fi
+    if [ "$ID" = ubuntu ]; then
+      # Ubuntu's Firefox package is a Snap transition, not a container browser.
+      if ! apt-get install -y --no-install-recommends ca-certificates curl gnupg; then
+        browser_install_failed "Mozilla Firefox signing key tools unavailable"
+      fi
+      if ! install_verified_apt_keyring "https://packages.mozilla.org/apt/repo-signing-key.gpg" /etc/apt/keyrings/crabbox-mozilla.gpg "35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3"; then
+        browser_install_failed "Mozilla Firefox signing key verification failed"
+      fi
+      install -m 0755 -d /etc/apt/sources.list.d /etc/apt/preferences.d
+      arch="$(dpkg --print-architecture)"
+      cat > /etc/apt/sources.list.d/crabbox-mozilla.sources <<MOZILLA
+Types: deb
+URIs: https://packages.mozilla.org/apt
+Suites: mozilla
+Components: main
+Architectures: $arch
+Signed-By: /etc/apt/keyrings/crabbox-mozilla.gpg
+MOZILLA
+      cat > /etc/apt/preferences.d/crabbox-mozilla <<'MOZILLA'
+Package: firefox
+Pin: origin packages.mozilla.org
+Pin-Priority: 1000
+
+Package: firefox
+Pin: release o=Ubuntu
+Pin-Priority: -1
+MOZILLA
+      chmod 0644 /etc/apt/sources.list.d/crabbox-mozilla.sources /etc/apt/preferences.d/crabbox-mozilla
+      if ! apt-get update -o APT::Update::Error-Mode=any ||
+        ! apt-get install -y --no-install-recommends firefox/mozilla ||
+        ! has_working_browser; then
+        browser_install_failed "Mozilla Firefox installation failed"
+      fi
+    else
+      for browser_package in chromium firefox-esr firefox; do
+        if has_working_browser; then break; fi
+        if apt-cache show "$browser_package" >/dev/null 2>&1; then
+          apt-get install -y --no-install-recommends "$browser_package" || true
+        fi
+      done
+    fi
+  fi
+fi
+`
+
 const bootstrapScript = `
 set -eu
 image_path="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
@@ -3059,21 +3120,7 @@ if [ "${CRABBOX_DESKTOP:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
     apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme procps netcat-openbsd novnc websockify
   fi
 fi
-if [ "${CRABBOX_BROWSER:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
-  apt-get update
-  if apt-cache show chromium >/dev/null 2>&1; then
-    apt-get install -y --no-install-recommends chromium || true
-  fi
-  if ! command -v chromium >/dev/null 2>&1 || ! chromium --version >/dev/null 2>&1; then
-    rm -f /usr/local/bin/crabbox-browser
-    if apt-cache show firefox-esr >/dev/null 2>&1; then
-      apt-get install -y --no-install-recommends firefox-esr || true
-    fi
-  fi
-  if ! command -v chromium >/dev/null 2>&1 && ! command -v firefox-esr >/dev/null 2>&1 && apt-cache show firefox >/dev/null 2>&1; then
-    apt-get install -y --no-install-recommends firefox || true
-  fi
-fi
+` + localContainerBrowserInstallScript + `
 if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
   apt-get update
   install_docker_cli=0

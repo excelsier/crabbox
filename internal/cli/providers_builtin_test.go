@@ -692,6 +692,11 @@ func (testAWSProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProvi
 func (testAWSProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
+func (testAWSProvider) ConfigureSSHTarget(target *SSHTarget, readyCommand string) {
+	if target.TargetOS == targetLinux {
+		target.ReadyCheck = "timeout 20m cloud-init status --wait >/tmp/crabbox-cloud-init.log 2>&1 && " + readyCommand
+	}
+}
 func (testAWSProvider) ServerTypeForConfig(cfg Config) string {
 	candidates := awsInstanceTypeCandidatesForConfig(cfg)
 	if len(candidates) == 0 {
@@ -1298,6 +1303,13 @@ func (testBlacksmithProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values a
 }
 func (p testBlacksmithProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
+}
+
+func (testBlacksmithProvider) ValidateRunOptions(req RunRequest) error {
+	if req.NoSync {
+		return exit(2, "blacksmith-testbox delegates sync; --no-sync is not supported")
+	}
+	return nil
 }
 
 type testDaytonaProvider struct{}

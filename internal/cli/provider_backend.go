@@ -38,14 +38,27 @@ type ProviderConfigDefaulter interface {
 	ApplyConfigDefaults(cfg *Config) error
 }
 
-// ProviderArchitectureCapability lets a provider admit architecture requests
-// whose runtime feasibility is validated inside the provider adapter.
+type ProviderSSHTargetConfigurer interface {
+	ConfigureSSHTarget(target *SSHTarget, readyCommand string)
+}
+
+// ProviderArchitectureCapability owns admission of the complete target/mode/
+// architecture tuple (including amd64), within ProviderSpec.Targets. Providers
+// without this capability retain core's managed architecture restrictions.
+// Runtime feasibility and explicit assertions are validated by the adapter.
 type ProviderArchitectureCapability interface {
 	SupportsArchitecture(cfg Config, architecture string) bool
 }
 
+// ProviderConfigArchitectureDescriber describes an omitted architecture for
+// config diagnostics only. It must not probe the runtime or change execution.
+type ProviderConfigArchitectureDescriber interface {
+	DescribeImplicitArchitecture(cfg Config) string
+}
+
 // ProviderClaimScoper contributes opaque routing identity to local claims.
 // Core persists and compares the value without interpreting provider fields.
+// The adapter must preserve its historical normalization, including whitespace.
 type ProviderClaimScoper interface {
 	ClaimScope(cfg Config) string
 }
@@ -76,8 +89,35 @@ type LeaseClaimEndpointPreparer interface {
 	PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug string, server Server, allowProviderMetadata bool) (Server, error)
 }
 
-type ProviderCommandRoutingArgs interface {
-	CommandRoutingArgs(cfg Config, leaseID string) []string
+// ProviderCommandRouter owns the non-secret route for generated follow-up commands.
+// Core owns shell rendering and passes Env separately to subprocesses.
+// Adapters use RoutingSafeURL for URL-valued fields, never for opaque paths/selectors.
+type ProviderCommandRouter interface {
+	CommandRouting(cfg Config, request CommandRoutingRequest) CommandRouting
+}
+
+// CommandRoutingRequest carries resolved lease context without making core
+// interpret provider-specific target or release settings.
+type CommandRoutingRequest struct {
+	LeaseID string
+	Purpose CommandRoutingPurpose
+	Target  SSHTarget
+}
+
+type CommandRoutingPurpose string
+
+const (
+	CommandRoutingReconnect CommandRoutingPurpose = "reconnect"
+	CommandRoutingRescue    CommandRoutingPurpose = "rescue"
+	CommandRoutingRetry     CommandRoutingPurpose = "retry"
+	CommandRoutingStop      CommandRoutingPurpose = "stop"
+)
+
+// CommandRouting keeps environment assignments out of argv. Env contains only
+// non-secret routing selectors, never credentials or credential contents.
+type CommandRouting struct {
+	Args []string
+	Env  []string
 }
 
 type DesktopCredentials struct {
@@ -233,6 +273,18 @@ type TailscaleMetadataBackend interface {
 	UpdateTailscaleMetadata(ctx context.Context, lease LeaseTarget, meta TailscaleMetadata) (Server, error)
 }
 
+// RunOptionsValidator optionally checks run flags before a caller acquires a
+// lease, including during dry-run planning. Validation must be side-effect-free:
+// no external I/O or lease-state access, and no dependency on a resolved lease.
+// Providers implement it for admission before Configure; their backend must
+// reuse the same policy at Run entry. No backend creation, processes, credential
+// lookup, or state writes are allowed. Planned reuse has ReuseLease=true and an
+// empty ID; a nonempty ID also implies reuse. Runtime-only fields such as Repo,
+// RunID, and Env may be absent during prewarm admission.
+type RunOptionsValidator interface {
+	ValidateRunOptions(RunRequest) error
+}
+
 type DelegatedRunBackend interface {
 	Backend
 	Warmup(ctx context.Context, req WarmupRequest) error
@@ -242,8 +294,9 @@ type DelegatedRunBackend interface {
 	Stop(ctx context.Context, req StopRequest) error
 }
 
-// StopReclaimBackend supports an explicit one-shot adoption before a delegated
-// provider stop. Providers without a strong adoption contract do not implement it.
+// StopReclaimBackend supports an explicit one-shot adoption before stopping an
+// exactly identified resource. Providers without a strong adoption contract do
+// not implement it.
 type StopReclaimBackend interface {
 	Backend
 	ReclaimAndStop(ctx context.Context, req StopRequest) error
@@ -312,6 +365,13 @@ type ReleaseLeaseConnectionCleanupPolicy interface {
 	ReleaseLeaseConnectionCleanupSafe() bool
 }
 
+// ReleaseLeaseWorkspacePolicy keeps run-owned authority available for a guarded
+// close after successful lease release. The captured SSH route must still reach
+// the workspace; retaining disk on a stopped host is not sufficient.
+type ReleaseLeaseWorkspacePolicy interface {
+	PreservesSSHWorkspaceAfterRelease() bool
+}
+
 // ReleaseLeaseTargetRefresher opts a provider into refreshing authorization
 // and connection metadata immediately before automatic lease cleanup.
 type ReleaseLeaseTargetRefresher interface {
@@ -354,6 +414,12 @@ type NativeCheckpointProvider interface {
 	NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool)
 }
 
+// NativeCheckpointSourcePolicyProvider lets API-native capture resolve a source
+// without starting it or minting transport credentials before stop consent.
+type NativeCheckpointSourcePolicyProvider interface {
+	NativeCheckpointSourceStatusOnly(Config) bool
+}
+
 type NativeCheckpointImage struct {
 	ID           string
 	Name         string
@@ -367,6 +433,9 @@ type NativeCheckpointImage struct {
 }
 
 type NativeCheckpointCreateRequest struct {
+	// Persist durably records cleanup identity before a provider mutates remote resources.
+	// Providers requiring interruption recovery must stop if persistence fails.
+	Persist      func(NativeCheckpointCreateResult) error
 	Config       Config
 	Server       Server
 	Target       SSHTarget
@@ -396,9 +465,12 @@ type NativeCheckpointWorkdirRequest struct {
 }
 
 type NativeCheckpointResourceRequest struct {
-	Config   Config
-	Image    NativeCheckpointImage
-	Metadata map[string]string
+	// Persist records recovered identity before deletion; absent on read-only verification.
+	Persist func(NativeCheckpointCreateResult) error
+	// LoadConfig is required only when the provider needs current CLI settings.
+	LoadConfig func() (Config, error)
+	Image      NativeCheckpointImage
+	Metadata   map[string]string
 }
 
 type NativeCheckpointVerifyResult struct {
@@ -454,6 +526,10 @@ type JSONListBackend interface {
 
 type IdempotentLeaseIDBackend interface {
 	SupportsRequestedLeaseID() bool
+}
+
+type CheckpointLeaseIDBackend interface {
+	SupportsRequestedCheckpointID() bool
 }
 
 type ProviderSpec struct {
@@ -769,12 +845,13 @@ type LeaseOptions struct {
 }
 
 type AcquireRequest struct {
-	Repo             Repo
-	Options          LeaseOptions
-	Keep             bool
-	Reclaim          bool
-	RequestedLeaseID string
-	RequestedSlug    string
+	Repo                  Repo
+	Options               LeaseOptions
+	Keep                  bool
+	Reclaim               bool
+	RequestedLeaseID      string
+	RequestedCheckpointID string
+	RequestedSlug         string
 	// OnAcquired observes a fully validated raw provider identity before local
 	// routing, readiness, or claim side effects. Returning an error requires the
 	// provider adapter to roll back the acquired resource.
@@ -917,11 +994,13 @@ type ListRequest struct {
 type RunRequest struct {
 	Repo                  Repo
 	ID                    string
+	ReuseLease            bool // Planned reuse without an ID; a nonempty ID also implies reuse.
 	RunID                 string
 	Options               LeaseOptions
 	Keep                  bool
 	Reclaim               bool
 	NoSync                bool
+	NoHydrate             bool
 	SyncOnly              bool
 	DebugSync             bool
 	ShellMode             bool
@@ -1351,18 +1430,6 @@ func validateProviderConfig(cfg Config) error {
 	return validateProviderClassSelector(provider, cfg)
 }
 
-func providerCommandRoutingArgs(cfg Config, leaseID string) []string {
-	provider, err := ProviderFor(cfg.Provider)
-	if err != nil {
-		return nil
-	}
-	router, ok := provider.(ProviderCommandRoutingArgs)
-	if !ok {
-		return nil
-	}
-	return router.CommandRoutingArgs(cfg, leaseID)
-}
-
 func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFlagValues) (bool, error) {
 	if fs == nil {
 		return false, nil
@@ -1614,6 +1681,7 @@ func featureSetHas(features FeatureSet, feature Feature) bool {
 }
 
 func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
+	// NoSync is adapter-owned: SDK/CLI transports can skip sync without archive sync.
 	provider := spec.Name
 	archiveSync := featureSetHas(spec.Features, FeatureArchiveSync)
 	moduleRun := featureSetHas(spec.Features, FeatureModuleRun)
@@ -1698,6 +1766,8 @@ func renderServerList(stdout io.Writer, servers []Server) {
 	}
 }
 
+const bestEffortLeaseTouchTimeout = 20 * time.Second
+
 func (a App) touchLeaseTargetBestEffort(ctx context.Context, cfg Config, lease LeaseTarget, state string) Server {
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
@@ -1712,7 +1782,9 @@ func (a App) touchLeaseTargetBestEffort(ctx context.Context, cfg Config, lease L
 	if state == "" {
 		state = blank(lease.Server.Labels["state"], "ready")
 	}
-	server, err := sshBackend.Touch(ctx, TouchRequest{Lease: lease, State: state, IdleTimeout: cfg.IdleTimeout})
+	touchCtx, cancel := context.WithTimeout(ctx, bestEffortLeaseTouchTimeout)
+	defer cancel()
+	server, err := sshBackend.Touch(touchCtx, TouchRequest{Lease: lease, State: state, IdleTimeout: cfg.IdleTimeout})
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, err)
 		return lease.Server

@@ -4,13 +4,264 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRunRecorderRedactsCoordinatorDiagnosticEvents(t *testing.T) {
+	const (
+		configuredSecret = "configured-provider-fixture-value"
+		runtimeSecret    = "runtime-provider-fixture-value"
+	)
+	t.Setenv("AWS_SESSION_TOKEN", runtimeSecret)
+
+	message := strings.Join([]string{
+		"provider request failed region=eu",
+		"configured=" + configuredSecret,
+		"runtime=" + runtimeSecret,
+		"Authorization: Bearer minted-provider-fixture-value",
+		strings.Join([]string{
+			"https://fixture-user",
+			"fixture-password@example.test/path?token=query-fixture-value&region=eu",
+		}, ":"),
+		`{"clientSecret":"json-fixture-value","message":"quota exceeded"}`,
+	}, "\n")
+
+	for _, test := range []struct {
+		name   string
+		kind   string
+		phase  string
+		record func(*runRecorder)
+	}{
+		{
+			name:  "hydration failure",
+			kind:  "actions.hydrate.failed",
+			phase: "hydrate",
+			record: func(rec *runRecorder) {
+				rec.Event("actions.hydrate.failed", "hydrate", message)
+			},
+		},
+		{
+			name:  "lease replacement failure",
+			kind:  "lease.replace.failed",
+			phase: "leasing",
+			record: func(rec *runRecorder) {
+				rec.Event("lease.replace.failed", "leasing", message)
+			},
+		},
+		{
+			name:  "terminal run failure",
+			kind:  "run.failed",
+			phase: "failed",
+			record: func(rec *runRecorder) {
+				rec.Failed(errors.New(message))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var events []CoordinatorRunEventInput
+			client := &CoordinatorClient{
+				BaseURL: "https://example.test",
+				Client:  &http.Client{Transport: runEventRecordingRoundTripper{events: &events}},
+			}
+			rec := newRunRecorder(context.Background(), client, Config{
+				Morph: MorphConfig{APIKey: configuredSecret},
+			}, []string{"go", "test"}, "", io.Discard, true)
+			rec.runID = "run_123"
+
+			test.record(rec)
+
+			if len(events) != 1 {
+				t.Fatalf("events=%v, want one posted diagnostic", events)
+			}
+			event := events[0]
+			if event.Type != test.kind || event.Phase != test.phase {
+				t.Fatalf("event=%#v, want type=%q phase=%q", event, test.kind, test.phase)
+			}
+			for _, leaked := range []string{
+				configuredSecret,
+				runtimeSecret,
+				"minted-provider-fixture-value",
+				"fixture-user",
+				"fixture-password",
+				"query-fixture-value",
+				"json-fixture-value",
+			} {
+				if strings.Contains(event.Message, leaked) {
+					t.Fatalf("coordinator diagnostic leaked %q: %s", leaked, event.Message)
+				}
+			}
+			for _, preserved := range []string{"provider request failed", "region=eu", "quota exceeded", diagnosticRedaction} {
+				if !strings.Contains(event.Message, preserved) {
+					t.Fatalf("coordinator diagnostic lost %q: %s", preserved, event.Message)
+				}
+			}
+		})
+	}
+}
+
+func TestRunRecorderPreservesRawStreamEventData(t *testing.T) {
+	const configuredSecret = "configured-output-fixture-value"
+	var events []CoordinatorRunEventInput
+	client := &CoordinatorClient{
+		BaseURL: "https://example.test",
+		Client:  &http.Client{Transport: runEventRecordingRoundTripper{events: &events}},
+	}
+	rec := newRunRecorder(context.Background(), client, Config{
+		Morph: MorphConfig{APIKey: configuredSecret},
+	}, []string{"go", "test"}, "", io.Discard, true)
+	rec.runID = "run_123"
+
+	stdout := rec.StreamWriter("stdout")
+	if _, err := stdout.Write([]byte("caller-owned output " + configuredSecret)); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Flush()
+	rec.waitForOutputEvents(time.Second)
+
+	if len(events) != 1 || events[0].Type != "stdout" {
+		t.Fatalf("events=%#v, want one stdout event", events)
+	}
+	if !strings.Contains(events[0].Data, configuredSecret) {
+		t.Fatalf("caller-owned stdout was unexpectedly rewritten: %#v", events[0])
+	}
+}
+
+func TestRunRecorderRedactsRefreshedRuntimeDiagnosticSecrets(t *testing.T) {
+	const (
+		originalSecret  = "original-runtime-fixture-value"
+		refreshedSecret = "refreshed-runtime-fixture-value"
+	)
+	t.Setenv("AWS_SESSION_TOKEN", originalSecret)
+
+	var events []CoordinatorRunEventInput
+	client := &CoordinatorClient{
+		BaseURL: "https://example.test",
+		Client:  &http.Client{Transport: runEventRecordingRoundTripper{events: &events}},
+	}
+	rec := newRunRecorder(context.Background(), client, Config{}, []string{"go", "test"}, "", io.Discard, true)
+	rec.runID = "run_123"
+	t.Setenv("AWS_SESSION_TOKEN", refreshedSecret)
+
+	rec.Event("actions.hydrate.failed", "hydrate", "original="+originalSecret+" refreshed="+refreshedSecret+" region=eu")
+
+	if len(events) != 1 {
+		t.Fatalf("events=%#v, want one posted diagnostic", events)
+	}
+	for _, leaked := range []string{originalSecret, refreshedSecret} {
+		if strings.Contains(events[0].Message, leaked) {
+			t.Fatalf("runtime diagnostic leaked %q after refresh: %s", leaked, events[0].Message)
+		}
+	}
+	if !strings.Contains(events[0].Message, "region=eu") {
+		t.Fatalf("runtime diagnostic lost routing context: %s", events[0].Message)
+	}
+}
+
+func TestRunRecorderRedactsDiagnosticSecretsAfterLateCoordinatorAttachment(t *testing.T) {
+	const (
+		configuredSecret = "late-configured-provider-fixture-value"
+		originalSecret   = "late-original-runtime-fixture-value"
+		refreshedSecret  = "late-refreshed-runtime-fixture-value"
+	)
+	t.Setenv("AWS_SESSION_TOKEN", originalSecret)
+
+	rec := newRunRecorder(context.Background(), nil, Config{
+		Morph: MorphConfig{APIKey: configuredSecret},
+	}, []string{"go", "test"}, "", io.Discard, true)
+	t.Setenv("AWS_SESSION_TOKEN", refreshedSecret)
+
+	var events []CoordinatorRunEventInput
+	rec.UseCoordinator(&CoordinatorClient{
+		BaseURL: "https://example.test",
+		Client:  &http.Client{Transport: runEventRecordingRoundTripper{events: &events}},
+	})
+	rec.runID = "run_123"
+	rec.Event("actions.hydrate.failed", "hydrate", strings.Join([]string{
+		"configured=" + configuredSecret,
+		"original=" + originalSecret,
+		"refreshed=" + refreshedSecret,
+		"region=eu",
+	}, " "))
+
+	if len(events) != 1 {
+		t.Fatalf("events=%#v, want one posted diagnostic", events)
+	}
+	for _, leaked := range []string{configuredSecret, originalSecret, refreshedSecret} {
+		if strings.Contains(events[0].Message, leaked) {
+			t.Fatalf("late-attached coordinator diagnostic leaked %q: %s", leaked, events[0].Message)
+		}
+	}
+	if !strings.Contains(events[0].Message, "region=eu") {
+		t.Fatalf("late-attached coordinator diagnostic lost routing context: %s", events[0].Message)
+	}
+}
+
+func TestRunRecorderRedactsPersistedCoordinatorDiagnosticEvents(t *testing.T) {
+	coordinatorURL := strings.TrimSpace(os.Getenv("CRABBOX_RUN_RECORDER_PROOF_URL"))
+	if coordinatorURL == "" {
+		t.Skip("set CRABBOX_RUN_RECORDER_PROOF_URL to verify a running coordinator")
+	}
+
+	const (
+		configuredSecret = "persisted-configured-provider-fixture-value"
+		originalSecret   = "persisted-original-runtime-fixture-value"
+		refreshedSecret  = "persisted-refreshed-runtime-fixture-value"
+	)
+	t.Setenv("AWS_SESSION_TOKEN", originalSecret)
+	cfg := Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+		Morph:      MorphConfig{APIKey: configuredSecret},
+	}
+	client := &CoordinatorClient{
+		BaseURL: coordinatorURL,
+		Token:   os.Getenv("CRABBOX_RUN_RECORDER_PROOF_TOKEN"),
+		Client:  &http.Client{Timeout: 10 * time.Second},
+	}
+	rec := newRunRecorder(context.Background(), nil, cfg, []string{"go", "test"}, "security-redaction-proof", io.Discard, true)
+	t.Setenv("AWS_SESSION_TOKEN", refreshedSecret)
+	rec.UseCoordinator(client)
+	run, err := client.CreateRun(context.Background(), "", cfg, rec.command, rec.label)
+	if err != nil {
+		t.Fatalf("create coordinator run: %v", err)
+	}
+	rec.attachRun(run)
+	rec.Event("actions.hydrate.failed", "hydrate", strings.Join([]string{
+		"configured=" + configuredSecret,
+		"original=" + originalSecret,
+		"refreshed=" + refreshedSecret,
+		"region=eu",
+	}, " "))
+
+	events, err := client.RunEvents(context.Background(), run.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("read persisted coordinator events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != "actions.hydrate.failed" {
+			continue
+		}
+		for _, leaked := range []string{configuredSecret, originalSecret, refreshedSecret} {
+			if strings.Contains(event.Message, leaked) {
+				t.Fatalf("persisted coordinator event leaked %q: %s", leaked, event.Message)
+			}
+		}
+		if !strings.Contains(event.Message, "region=eu") || !strings.Contains(event.Message, diagnosticRedaction) {
+			t.Fatalf("persisted coordinator event lost diagnostic context: %s", event.Message)
+		}
+		t.Logf("persisted coordinator run=%s event=%s message=%q", run.ID, event.Type, event.Message)
+		return
+	}
+	t.Fatalf("persisted coordinator events missing diagnostic: %#v", events)
+}
 
 func TestRunEventStreamWriterCapsOutputEvents(t *testing.T) {
 	t.Setenv("CRABBOX_OWNER", "test@example.com")

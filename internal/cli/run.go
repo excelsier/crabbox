@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -86,6 +85,11 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		if !ok || !capable.SupportsRequestedLeaseID() {
 			return exit(2, "provider=%s does not support fixed idempotent lease IDs", backend.Spec().Name)
 		}
+		unlock, err := lockFixedLeaseAcquisition(ctx, strings.TrimSpace(*requestedLeaseID))
+		if err != nil {
+			return err
+		}
+		defer unlock()
 	}
 	options := leaseOptionsFromConfig(cfg)
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
@@ -121,9 +125,12 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		return err
 	}
 	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
+	// A fixed acquisition may adopt another caller's successful lease. Its known
+	// identity remains replayable after orchestration failure, just like a fork.
+	retainOnFailure := strings.TrimSpace(*requestedLeaseID) != "" || controllerOwnsCleanup.Load()
 	applyResolvedServerConfig(&cfg, server)
 	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
-		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, controllerOwnsCleanup.Load())
+		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, retainOnFailure)
 		return err
 	}
 	if observe != nil {
@@ -139,7 +146,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		}
 	}
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
-		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, controllerOwnsCleanup.Load())
+		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, retainOnFailure)
 		return err
 	} else {
 		target = resolved.Target
@@ -182,8 +189,8 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	return nil
 }
 
-func (a App) releaseWarmupLeaseAfterFailure(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget, controllerOwnsCleanup bool) {
-	if controllerOwnsCleanup {
+func (a App) releaseWarmupLeaseAfterFailure(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget, retain bool) {
+	if retain {
 		return
 	}
 	a.releaseBackendLeaseBestEffort(ctx, backend, cfg, lease)
@@ -255,7 +262,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		LeaseID:                fs.String("id", "", "existing lease or server id"),
 		Keep:                   fs.Bool("keep", false, "keep server after command"),
 		KeepOnFailure:          fs.Bool("keep-on-failure", false, "keep a newly acquired lease when the remote command exits non-zero"),
-		NoSync:                 fs.Bool("no-sync", false, "skip rsync"),
+		NoSync:                 fs.Bool("no-sync", false, "skip local file transfer (unsupported by Blacksmith Testbox)"),
 		SyncOnly:               fs.Bool("sync-only", false, "sync and exit"),
 		NoHydrate:              fs.Bool("no-hydrate", false, "skip configured Actions hydration"),
 		DebugSync:              fs.Bool("debug", false, "print detailed sync timing"),
@@ -309,6 +316,58 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 	values.TimingJSON = fs.Bool("timing-json", false, "print final timing as JSON")
 	values.TimingRecord = fs.String("timing-record", "", "append final timing to benchmark JSONL store: default, off, or path")
 	return values
+}
+
+func loadRunConfig(fs *flag.FlagSet, flags runFlagValues, target leaseFlagTarget, mutateExternal bool) (Config, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Profile = *flags.Lease.Profile
+	if err := applySelectedProfileConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := applyLeaseCreateFlagsForTarget(&cfg, fs, flags.Lease, target, mutateExternal); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// Shared projection for run and generated probes; runtime metadata is added later.
+func runRequestFromFlags(cfg Config, flags runFlagValues, command []string) RunRequest {
+	return RunRequest{
+		ID:                    *flags.LeaseID,
+		ReuseLease:            *flags.LeaseID != "",
+		Options:               leaseOptionsFromConfig(cfg),
+		Keep:                  *flags.Keep,
+		KeepOnFailure:         *flags.KeepOnFailure,
+		Reclaim:               *flags.Reclaim,
+		NoSync:                *flags.NoSync,
+		NoHydrate:             *flags.NoHydrate,
+		SyncOnly:              *flags.SyncOnly,
+		DebugSync:             *flags.DebugSync,
+		ShellMode:             *flags.ShellMode,
+		ChecksumSync:          *flags.ChecksumSync,
+		ForceSyncLarge:        *flags.ForceSyncLarge,
+		FullResync:            *flags.FullResync || *flags.FreshSync,
+		EnvHelper:             strings.TrimSpace(*flags.EnvHelper),
+		CaptureStdout:         *flags.CaptureStdout,
+		CaptureStderr:         *flags.CaptureStderr,
+		CaptureOnFail:         *flags.CaptureOnFail,
+		Preflight:             *flags.Preflight,
+		Downloads:             append([]string(nil), (*flags.Downloads)...),
+		ScriptRequested:       *flags.ScriptPath != "" || *flags.ScriptStdin,
+		ApplyLocalPatch:       *flags.ApplyLocalPatch,
+		Command:               command,
+		Label:                 strings.TrimSpace(*flags.RunLabel),
+		RequestedSlug:         strings.TrimSpace(*flags.Lease.Slug),
+		TimingJSON:            *flags.TimingJSON,
+		ArtifactGlobs:         append([]string(nil), (*flags.ArtifactGlobs)...),
+		RequiredArtifactGlobs: appendUniqueStrings(nil, (*flags.RequiredArtifacts)...),
+		EmitProof:             strings.TrimSpace(*flags.EmitProof),
+		ProofTemplate:         strings.TrimSpace(*flags.ProofTemplate),
+		StopAfter:             strings.TrimSpace(*flags.StopAfter),
+	}
 }
 
 func (a App) runCommand(ctx context.Context, args []string) error {
@@ -479,15 +538,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return exit(2, "--pool cannot be combined with --full-resync or --fresh-sync")
 	}
 
-	cfg, err := loadConfig()
+	cfg, err := loadRunConfig(fs, runFlags, leaseFlagTarget{ID: *leaseIDFlag, Reuse: *leaseIDFlag != ""}, true)
 	if err != nil {
-		return err
-	}
-	cfg.Profile = *leaseFlags.Profile
-	if err := applySelectedProfileConfig(&cfg); err != nil {
-		return err
-	}
-	if err := applyLeaseCreateFlagsForLease(&cfg, fs, leaseFlags, *leaseIDFlag); err != nil {
 		return err
 	}
 	if err := validateReadyPoolImageRequirements(cfg.imageRequirements, *readyPool); err != nil {
@@ -684,43 +736,17 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	options := leaseOptionsFromConfig(cfg)
 	scriptRequested := *scriptPath != "" || *scriptStdin
 	var script *RunScriptSpec
-	runReq := RunRequest{
-		Repo:                  repo,
-		ID:                    *leaseIDFlag,
-		RunID:                 executionRunID,
-		Options:               options,
-		Keep:                  *keep,
-		KeepOnFailure:         *keepOnFailure,
-		Reclaim:               *reclaim,
-		NoSync:                *noSync,
-		SyncOnly:              *syncOnly,
-		DebugSync:             *debugSync,
-		ShellMode:             *shellMode,
-		ChecksumSync:          *checksumSync,
-		ForceSyncLarge:        *forceSyncLarge,
-		FullResync:            fullResyncRequested,
-		EnvHelper:             envHelperName,
-		CaptureStdout:         *captureStdout,
-		CaptureStderr:         *captureStderr,
-		CaptureOnFail:         *captureOnFail,
-		Preflight:             *preflight,
-		Downloads:             downloads,
-		Env:                   envSelection.Effective,
-		EnvSummary:            envSelection.SummaryRequested,
-		ScriptRequested:       scriptRequested,
-		FreshPR:               freshPR,
-		ApplyLocalPatch:       *applyLocalPatch,
-		Command:               command,
-		Label:                 runLabelValue,
-		RequestedSlug:         requestedSlug,
-		TimingJSON:            *timingJSON || timingRecordEnabled,
-		ArtifactGlobs:         expansion.ArtifactGlobs,
-		RequiredArtifactGlobs: requiredArtifactGlobs,
-		EmitProof:             strings.TrimSpace(*emitProof),
-		ProofTemplate:         strings.TrimSpace(*proofTemplate),
-		ProfileVariables:      expansion.Variables,
-		StopAfter:             strings.TrimSpace(*stopAfter),
-	}
+	runReq := runRequestFromFlags(cfg, runFlags, command)
+	runReq.Repo = repo
+	runReq.RunID = executionRunID
+	runReq.Env = envSelection.Effective
+	runReq.EnvSummary = envSelection.SummaryRequested
+	runReq.FreshPR = freshPR
+	runReq.RequestedSlug = requestedSlug
+	runReq.TimingJSON = *timingJSON || timingRecordEnabled
+	runReq.ArtifactGlobs = expansion.ArtifactGlobs
+	runReq.RequiredArtifactGlobs = requiredArtifactGlobs
+	runReq.ProfileVariables = expansion.Variables
 	delegatedRoutePreflighted := false
 	if providerSelectionIsActionable(cfg) {
 		provider, err := ProviderFor(cfg.Provider)
@@ -728,10 +754,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		providerSpec := provider.Spec()
+		if err := validateProviderRun(provider, runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
+			return err
+		}
 		if providerSpec.Kind == ProviderKindDelegatedRun {
-			if err := validateDelegatedRunRouting(providerSpec, runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
-				return err
-			}
 			if delegatedRunNeedsLocalWorkspaceSync(providerSpec, runReq) {
 				if err := validateLocalWorkspaceSyncSource(repo); err != nil {
 					return err
@@ -1012,8 +1038,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	recordCommand := runScriptRecordCommand(script, command)
 	timingRecordCommand = recordCommand
+	recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "")
 	if useCoordinator {
-		recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "")
 		recorder.Event("leasing.started", "leasing", "")
 	}
 	endToEndStartedAt := time.Now()
@@ -1091,8 +1117,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		cleanup.Err = releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
 		cleanup.Stopped = cleanup.Err == nil
 		if cleanup.Err == nil {
-			// Destructive cleanup owns the quiesced owner once the lease is gone.
-			lifecycleOwner = nil
+			policy, ok := sshBackend.(ReleaseLeaseWorkspacePolicy)
+			if !ok || !policy.PreservesSSHWorkspaceAfterRelease() {
+				// Destructive cleanup owns the quiesced owner once the lease is gone.
+				lifecycleOwner = nil
+			}
 			recorder.Event("lease.released", "released", "")
 		}
 		if !*timingJSON {
@@ -1763,8 +1792,8 @@ retrySync:
 		}
 		if !overlayDecision.Enabled && !plainManifestFallback && coherence.seedEnabled() {
 			stepStart = time.Now()
-			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
-				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
+			if out, err := runIdempotentSSHCombinedOutputLimit(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay, gitSeedDiagnosticLimit); err != nil {
+				warnRemoteGitSeedFailure(a.Stderr, out, err)
 			}
 			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}
@@ -2394,13 +2423,14 @@ afterSync:
 			CommandDisplay:        commandDisplay,
 			ShellMode:             *shellMode || useShell,
 			ScriptMode:            script != nil,
-			RoutingArgs:           runFailureDigestRoutingArgs(cfg, leaseID),
-			SSHRoutingArgs:        runFailureDigestSSHRoutingArgs(cfg, leaseID),
+			Routing:               CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
+			SSHRouting:            CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
+			StopRouting:           CommandRoutingFor(cfg, leaseID, CommandRoutingStop),
 			StopCommand:           report.StopCommand,
 			Classification:        classification,
 			Phases:                timings.commandPhases,
 			Results:               results,
-		}, stdoutTail, stderrTail, *captureStdout, *captureStderr)
+		})
 		capture := FailureCaptureMetadata{
 			Provider:       cfg.Provider,
 			LeaseID:        leaseID,
@@ -2645,266 +2675,12 @@ func runCommandShellStringWithLiteralArgs(command []string, shellMode bool, lite
 }
 
 func runStopCommand(cfg Config, id string) string {
-	args := []string{"crabbox", "stop", "--provider", cfg.Provider}
-	if strings.TrimSpace(cfg.TargetOS) != "" {
-		args = append(args, "--target", cfg.TargetOS)
-	}
-	if cfg.TargetOS == targetWindows && strings.TrimSpace(cfg.WindowsMode) != "" {
-		args = append(args, "--windows-mode", cfg.WindowsMode)
-	}
-	if strings.TrimSpace(cfg.Static.Host) != "" {
-		args = append(args, "--static-host", cfg.Static.Host)
-	}
-	if strings.TrimSpace(cfg.Static.User) != "" {
-		args = append(args, "--static-user", cfg.Static.User)
-	}
-	if strings.TrimSpace(cfg.Static.Port) != "" {
-		args = append(args, "--static-port", cfg.Static.Port)
-	}
-	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
-		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
-	}
-	args = appendProviderStopRoutingArgs(args, cfg, id)
+	routing := CommandRoutingFor(cfg, id, CommandRoutingStop)
+	args := append([]string{"crabbox", "stop"}, routing.Args...)
 	if strings.TrimSpace(id) != "" {
 		args = append(args, "--id", id)
 	}
-	return readableShellCommand(args)
-}
-
-func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []string {
-	switch normalizeProviderName(cfg.Provider) {
-	case "namespace-instance":
-		if strings.TrimSpace(cfg.NamespaceInstance.CLIPath) != "" && cfg.NamespaceInstance.CLIPath != "nsc" {
-			args = append(args, "--namespace-instance-cli", cfg.NamespaceInstance.CLIPath)
-		}
-		if strings.TrimSpace(cfg.NamespaceInstance.Endpoint) != "" {
-			args = append(args, "--namespace-instance-endpoint", routingSafeURL(cfg.NamespaceInstance.Endpoint))
-		}
-		if strings.TrimSpace(cfg.NamespaceInstance.Region) != "" {
-			args = append(args, "--namespace-instance-region", cfg.NamespaceInstance.Region)
-		}
-		if strings.TrimSpace(cfg.NamespaceInstance.Keychain) != "" {
-			args = append(args, "--namespace-instance-keychain", cfg.NamespaceInstance.Keychain)
-		}
-	case "proxmox":
-		if strings.TrimSpace(cfg.Proxmox.APIURL) != "" {
-			args = append(args, "--proxmox-api-url", routingSafeURL(cfg.Proxmox.APIURL))
-		}
-		if strings.TrimSpace(cfg.Proxmox.Node) != "" {
-			args = append(args, "--proxmox-node", cfg.Proxmox.Node)
-		}
-		if cfg.Proxmox.InsecureTLS {
-			args = append(args, "--proxmox-insecure-tls")
-		}
-	case "xcp-ng":
-		if strings.TrimSpace(cfg.XCPNg.APIURL) != "" {
-			args = append(args, "--xcp-ng-api-url", routingSafeURL(cfg.XCPNg.APIURL))
-		}
-		if strings.TrimSpace(cfg.XCPNg.Username) != "" {
-			args = append(args, "--xcp-ng-username", cfg.XCPNg.Username)
-		}
-		if strings.TrimSpace(cfg.XCPNg.Template) != "" {
-			args = append(args, "--xcp-ng-template", cfg.XCPNg.Template)
-		}
-		if strings.TrimSpace(cfg.XCPNg.TemplateUUID) != "" {
-			args = append(args, "--xcp-ng-template-uuid", cfg.XCPNg.TemplateUUID)
-		}
-		if strings.TrimSpace(cfg.XCPNg.SR) != "" {
-			args = append(args, "--xcp-ng-sr", cfg.XCPNg.SR)
-		}
-		if strings.TrimSpace(cfg.XCPNg.SRUUID) != "" {
-			args = append(args, "--xcp-ng-sr-uuid", cfg.XCPNg.SRUUID)
-		}
-		if strings.TrimSpace(cfg.XCPNg.Network) != "" {
-			args = append(args, "--xcp-ng-network", cfg.XCPNg.Network)
-		}
-		if strings.TrimSpace(cfg.XCPNg.NetworkUUID) != "" {
-			args = append(args, "--xcp-ng-network-uuid", cfg.XCPNg.NetworkUUID)
-		}
-		if strings.TrimSpace(cfg.XCPNg.Host) != "" {
-			args = append(args, "--xcp-ng-host", cfg.XCPNg.Host)
-		}
-		if strings.TrimSpace(cfg.XCPNg.User) != "" {
-			args = append(args, "--xcp-ng-user", cfg.XCPNg.User)
-		}
-		if strings.TrimSpace(cfg.XCPNg.WorkRoot) != "" {
-			args = append(args, "--xcp-ng-work-root", cfg.XCPNg.WorkRoot)
-		}
-		if cfg.XCPNg.InsecureTLS {
-			args = append(args, "--xcp-ng-insecure-tls")
-		}
-	case "namespace", "namespace-devbox":
-		if strings.TrimSpace(cfg.Namespace.Site) != "" {
-			args = append(args, "--namespace-site", cfg.Namespace.Site)
-		}
-		if strings.TrimSpace(cfg.Namespace.WorkRoot) != "" {
-			args = append(args, "--namespace-work-root", cfg.Namespace.WorkRoot)
-		}
-		if DeleteOnReleaseExplicit(cfg, "namespace-devbox") {
-			args = append(args, fmt.Sprintf("--namespace-delete-on-release=%t", cfg.Namespace.DeleteOnRelease))
-		}
-	case "coder":
-		args = append(args, fmt.Sprintf("--coder-delete-on-release=%t", cfg.Coder.DeleteOnRelease))
-	case "daytona":
-		if strings.TrimSpace(cfg.Daytona.APIURL) != "" {
-			args = append(args, "--daytona-api-url", routingSafeURL(cfg.Daytona.APIURL))
-		}
-		if strings.TrimSpace(cfg.Daytona.Target) != "" {
-			args = append(args, "--daytona-target", cfg.Daytona.Target)
-		}
-		if strings.TrimSpace(cfg.Daytona.User) != "" {
-			args = append(args, "--daytona-user", cfg.Daytona.User)
-		}
-	case "sprites":
-		if strings.TrimSpace(cfg.Sprites.APIURL) != "" {
-			args = append(args, "--sprites-api-url", routingSafeURL(cfg.Sprites.APIURL))
-		}
-	case "semaphore":
-		if strings.TrimSpace(cfg.Semaphore.Host) != "" {
-			args = append(args, "--semaphore-host", cfg.Semaphore.Host)
-		}
-	case "exe-dev":
-		if strings.TrimSpace(cfg.ExeDev.ControlHost) != "" {
-			args = append(args, "--exe-dev-control-host", cfg.ExeDev.ControlHost)
-		}
-	case "morph":
-		if strings.TrimSpace(cfg.Morph.APIURL) != "" {
-			args = append(args, "--morph-api-url", routingSafeURL(cfg.Morph.APIURL))
-		}
-		if DeleteOnReleaseExplicit(cfg, "morph") {
-			args = append(args, fmt.Sprintf("--morph-delete-on-release=%t", cfg.Morph.DeleteOnRelease))
-		}
-	case "hostinger":
-		if strings.TrimSpace(cfg.Hostinger.APIURL) != "" {
-			args = append(args, "--hostinger-url", routingSafeURL(cfg.Hostinger.APIURL))
-		}
-	case "vast", "vast-ai", "vastai":
-		if apiURL := strings.TrimSpace(cfg.Vast.APIURL); apiURL != "" {
-			args = append(args, "--vast-api-url", routingSafeURL(apiURL))
-		}
-		if DeleteOnReleaseExplicit(cfg, "vast") {
-			args = append(args, "--vast-release-action", cfg.Vast.ReleaseAction)
-		}
-	case "nvidia-brev":
-		if cli := strings.TrimSpace(cfg.NvidiaBrev.CLI); cli != "" {
-			args = append(args, "--nvidia-brev-cli", cli)
-		}
-		if target := strings.TrimSpace(cfg.NvidiaBrev.Target); target != "" && target != "container" {
-			args = append(args, "--nvidia-brev-target", target)
-		}
-		if user := strings.TrimSpace(cfg.NvidiaBrev.User); user != "" {
-			args = append(args, "--nvidia-brev-user", user)
-		}
-		if DeleteOnReleaseExplicit(cfg, "nvidia-brev") {
-			args = append(args, "--nvidia-brev-release-action", cfg.NvidiaBrev.ReleaseAction)
-		}
-	case "kubevirt":
-		if strings.TrimSpace(cfg.KubeVirt.Kubectl) != "" {
-			args = append(args, "--kubevirt-kubectl", cfg.KubeVirt.Kubectl)
-		}
-		if strings.TrimSpace(cfg.KubeVirt.Virtctl) != "" {
-			args = append(args, "--kubevirt-virtctl", cfg.KubeVirt.Virtctl)
-		}
-		if strings.TrimSpace(cfg.KubeVirt.Kubeconfig) != "" {
-			args = append(args, "--kubevirt-kubeconfig", cfg.KubeVirt.Kubeconfig)
-		} else if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
-			args = append([]string{"KUBECONFIG=" + value}, args...)
-		}
-		if strings.TrimSpace(cfg.KubeVirt.Context) != "" {
-			args = append(args, "--kubevirt-context", cfg.KubeVirt.Context)
-		}
-		if strings.TrimSpace(cfg.KubeVirt.Namespace) != "" {
-			args = append(args, "--kubevirt-namespace", cfg.KubeVirt.Namespace)
-		}
-		if strings.TrimSpace(cfg.KubeVirt.Template) != "" {
-			args = append(args, "--kubevirt-template", cfg.KubeVirt.Template)
-		}
-		if DeleteOnReleaseExplicit(cfg, "kubevirt") {
-			args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
-		}
-	case "sealos-devbox":
-		workRoot := EffectiveSealosDevboxWorkRoot(cfg)
-		if strings.TrimSpace(cfg.SealosDevbox.Kubectl) != "" {
-			args = append(args, "--sealos-devbox-kubectl", cfg.SealosDevbox.Kubectl)
-		}
-		if strings.TrimSpace(cfg.SealosDevbox.Kubeconfig) != "" {
-			args = append(args, "--sealos-devbox-kubeconfig", cfg.SealosDevbox.Kubeconfig)
-		}
-		for _, routing := range []struct {
-			flagName string
-			value    string
-		}{
-			{flagName: "--sealos-devbox-context", value: cfg.SealosDevbox.Context},
-			{flagName: "--sealos-devbox-namespace", value: cfg.SealosDevbox.Namespace},
-			{flagName: "--sealos-devbox-network", value: cfg.SealosDevbox.Network},
-			{flagName: "--sealos-devbox-ssh-gateway-host", value: cfg.SealosDevbox.SSHGatewayHost},
-			{flagName: "--sealos-devbox-ssh-gateway-port", value: cfg.SealosDevbox.SSHGatewayPort},
-			{flagName: "--sealos-devbox-node-host", value: cfg.SealosDevbox.NodeHost},
-			{flagName: "--sealos-devbox-ssh-user", value: cfg.SealosDevbox.SSHUser},
-			{flagName: "--sealos-devbox-work-root", value: workRoot},
-		} {
-			if strings.TrimSpace(routing.value) != "" {
-				args = append(args, routing.flagName, routing.value)
-			}
-		}
-		if DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
-			args = append(args, fmt.Sprintf("--sealos-devbox-delete-on-release=%t", cfg.SealosDevbox.DeleteOnRelease))
-		}
-		if strings.TrimSpace(cfg.SealosDevbox.Kubeconfig) == "" {
-			if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
-				args = append([]string{"KUBECONFIG=" + value}, args...)
-			}
-		}
-	case "incus":
-		if DeleteOnReleaseExplicit(cfg, "incus") {
-			args = append(args, fmt.Sprintf("--incus-delete-on-release=%t", cfg.Incus.DeleteOnRelease))
-		}
-	case "external":
-		if path, err := ExternalRoutingPath(id); err == nil {
-			args = append(args, externalRoutingFileArgs(path, cfg.External)...)
-		} else {
-			if strings.TrimSpace(cfg.External.Command) != "" {
-				args = append(args, "--external-command", cfg.External.Command)
-			}
-			if strings.TrimSpace(cfg.External.WorkRoot) != "" {
-				args = append(args, "--external-work-root", cfg.External.WorkRoot)
-			}
-			if strings.TrimSpace(cfg.External.Connection.Desktop.Username) != "" {
-				args = append(args, "--external-desktop-username", cfg.External.Connection.Desktop.Username)
-			}
-			if strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv) != "" {
-				args = append(args, "--external-desktop-password-env", cfg.External.Connection.Desktop.PasswordEnv)
-			}
-		}
-	}
-	return args
-}
-
-func routingSafeURL(value string) string {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		return value
-	}
-	addedScheme := false
-	parseValue := raw
-	if !strings.Contains(parseValue, "://") {
-		parseValue = "https://" + parseValue
-		addedScheme = true
-	}
-	u, err := url.Parse(parseValue)
-	if err != nil {
-		return sanitizedMalformedConfigURL(parseValue, addedScheme)
-	}
-	if u.User == nil {
-		return value
-	}
-	safe := *u
-	safe.User = nil
-	out := safe.String()
-	if addedScheme {
-		out = strings.TrimPrefix(out, "https://")
-	}
-	return out
+	return routing.ShellCommand(args)
 }
 
 type runTimings struct {
@@ -3044,6 +2820,18 @@ func validateDelegatedRunRouting(spec ProviderSpec, req RunRequest, readyPool st
 		return exit(2, "%s delegates run execution; profile doctor is not supported", spec.Name)
 	}
 	return RejectDelegatedSyncOptionsForSpec(spec, req)
+}
+
+func validateProviderRun(provider Provider, req RunRequest, readyPool string, hasArtifactSchemas, profileDoctor bool) error {
+	if validator, ok := provider.(RunOptionsValidator); ok {
+		if err := validator.ValidateRunOptions(req); err != nil {
+			return err
+		}
+	}
+	if spec := provider.Spec(); spec.Kind == ProviderKindDelegatedRun {
+		return validateDelegatedRunRouting(spec, req, readyPool, hasArtifactSchemas, profileDoctor)
+	}
+	return nil
 }
 
 func rawJSRuntimeHydrateSuggestion(cfg Config, target SSHTarget, leaseID string, acquired, keep, keepOnFailure bool) string {
@@ -4071,6 +3859,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "adopt an unclaimed provider resource before stopping it")
+	forceRecovery := fs.Bool("force", false, "recover and stop one exactly identified provider resource")
 	expectedLeaseID := fs.String("expected-provider-lease-id", "", "internal: immutable provider lease identity")
 	expectedAttemptLeaseID := fs.String("expected-provider-attempt-lease-id", "", "internal: immutable provider attempt identity")
 	expectedSlug := fs.String("expected-provider-slug", "", "internal: immutable provider slug identity")
@@ -4088,6 +3877,17 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
 		return exit(2, "usage: crabbox stop --id <lease-or-server-id>")
 	}
+	if *forceRecovery {
+		if !flagWasSet(fs, "provider") {
+			return exit(2, "stop --force requires an explicit --provider")
+		}
+		if !idFlagSet {
+			return exit(2, "stop --force requires an exact --id")
+		}
+		if *reclaim {
+			return exit(2, "stop --force cannot be combined with --reclaim")
+		}
+	}
 	expectedFlagNames := []string{
 		"expected-provider-lease-id",
 		"expected-provider-attempt-lease-id",
@@ -4099,6 +3899,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 		if flagWasSet(fs, name) {
 			expectedFlagCount++
 		}
+	}
+	if *forceRecovery && (expectedFlagCount != 0 || *confirmedAbsentLocalCleanup || flagWasSet(fs, "expected-provider-scope") || flagWasSet(fs, "expected-coordinator-registration-url")) {
+		return exit(2, "stop --force cannot be combined with controller-owned release identity")
 	}
 	if expectedFlagCount != 0 && expectedFlagCount != len(expectedFlagNames) {
 		return exit(2, "internal provider release requires the complete expected identity set")
@@ -4212,6 +4015,17 @@ func (a App) stop(ctx context.Context, args []string) error {
 		}
 		return nil
 	}
+	if *forceRecovery {
+		if reclaimer, ok := backend.(StopReclaimBackend); ok {
+			return reclaimer.ReclaimAndStop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id})
+		}
+		if backendCoordinator(backend) == nil {
+			return exit(2, "provider=%s does not support verified forced recovery; inspect the resource and use its provider CLI", backend.Spec().Name)
+		}
+		if !isCanonicalLeaseID(*id) {
+			return exit(2, "provider=%s stop --force requires an exact coordinator lease id", backend.Spec().Name)
+		}
+	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if !expectedIdentity.empty() {
 			return exit(2, "provider=%s cannot validate an expected release identity", backend.Spec().Name)
@@ -4239,7 +4053,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 		ExpectedProviderIdentity: expectedIdentity,
 	})
 	if err != nil {
-		if backendCoordinator(backend) != nil {
+		if backendCoordinator(backend) != nil && !*forceRecovery {
 			if isCoordinatorProviderIdentityError(err) {
 				return err
 			}

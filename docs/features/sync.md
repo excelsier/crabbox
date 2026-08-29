@@ -12,6 +12,14 @@ own their own file transfer and reject the local sync options. Native Windows
 targets use the same file list but ship it as a tar archive over OpenSSH instead
 of rsync.
 
+`--no-sync` skips local file transfer only on providers that support it.
+Blacksmith Testbox rejects it before lease access or execution because native
+Testbox runs own sync and offer no supported bypass, including when reusing an
+ID. See [Blacksmith Testbox](../providers/blacksmith-testbox.md).
+
+Skipping sync does not skip provider initialization. Generated prewarm probes
+are admitted before backend configuration or warmup.
+
 ## Remote workspace path
 
 For normal SSH-backed runs, sync starts from the effective work root and derives
@@ -72,8 +80,9 @@ Git repository.
 
 If you are starting from an existing Git checkout and want a colocated Jujutsu
 workspace, `jj git init --git-repo=.` is one initialization example. It does not
-convert an existing native Jujutsu repository in place. Use `--no-sync` when you
-intentionally want to run without transferring local files.
+convert an existing native Jujutsu repository in place. Use `--no-sync` with a
+supporting provider when you intentionally want to run without transferring
+local files.
 
 The built-in excludes are intentionally conservative. They cover common churn
 such as `node_modules`, `.git`, `dist`, `coverage`, `playwright-report`,
@@ -202,6 +211,17 @@ Crabbox disables Git seeding when the origin is an HTTP(S) URL with embedded
 userinfo, warns without printing the URL, and uses the normal file sync instead.
 This prevents credentials stored in local Git remotes from reaching lease
 command arguments or the seeded worktree's Git configuration.
+
+If seeding fails, ordinary runs, local Actions hydration, and native Windows
+sync warn with a fixed phase, advisory failure category, and command exit
+status. Categories distinguish missing Git, authentication/access, DNS,
+connectivity, TLS, repository/ref, and verification failures when recognizable.
+Raw Git/SSH output, URLs, paths, and credential-helper messages are never
+replayed in this warning. Capture is limited to 16 KiB in memory; oversized or
+unrecognized output produces an `unknown` diagnosis instead of guessing.
+Crabbox continues with file sync, but this does not guarantee that later Git
+coherence checks or the workload will succeed. Existing Git metadata may still
+be present; the failed seed has not established that it is current or usable.
 
 ### Opt-in Git overlay
 

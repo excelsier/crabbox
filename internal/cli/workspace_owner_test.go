@@ -497,7 +497,7 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 		t.Fatalf("POSIX child witness must use the portable launcher: %q", posixWitnessTransport[:min(len(posixWitnessTransport), 80)])
 	}
 	posixWitness := remoteWorkspaceOwnerPOSIXWitnessScript(key, token, "printf ok")
-	for _, want := range []string{"child_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", "mv \"$child_tmp\" \"$child\"", "touch \"$start\"", "wait \"$child_pid\"", "rm -f \"$child\""} {
+	for _, want := range []string{"child_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", "mv \"$child_tmp\" \"$child\"", "rm -f \"$child\""} {
 		if !strings.Contains(posixWitness, want) {
 			t.Fatalf("POSIX child witness missing %q:\n%s", want, posixWitness)
 		}
@@ -1223,14 +1223,17 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 
 	shells := []struct {
 		name string
+		mask string
 		args []string
 	}{
-		{name: "bash", args: []string{"--noprofile", "--norc", "-c"}},
-		{name: "zsh", args: []string{"-f", "-c"}},
-		{name: "fish", args: []string{"--no-config", "-c"}},
+		{name: "bash", mask: "022", args: []string{"--noprofile", "--norc", "-c"}},
+		{name: "bash", mask: "027", args: []string{"--noprofile", "--norc", "-c"}},
+		{name: "bash", mask: "077", args: []string{"--noprofile", "--norc", "-c"}},
+		{name: "zsh", mask: "027", args: []string{"-f", "-c"}},
+		{name: "fish", mask: "077", args: []string{"--no-config", "-c"}},
 	}
 	for _, shell := range shells {
-		t.Run(shell.name, func(t *testing.T) {
+		t.Run(shell.name+"/umask-"+shell.mask, func(t *testing.T) {
 			shellPath, err := exec.LookPath(shell.name)
 			if err != nil {
 				t.Skipf("%s is not installed; portable launcher source remains covered", shell.name)
@@ -1244,6 +1247,11 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 				if _, err := os.Stat("/bin/zsh"); err == nil {
 					shellPath = "/bin/zsh"
 				}
+			}
+
+			command := func(remote string) *exec.Cmd {
+				args := append([]string{"-c", `umask "$1"; shift; exec "$@"`, "umask-test", shell.mask, shellPath}, shell.args...)
+				return exec.Command("sh", append(args, remote)...)
 			}
 
 			const finalizeToken = "0123456789abcdef0123456789abcdef"
@@ -1268,12 +1276,15 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 			if !strings.HasPrefix(acquireTransport, "exec /bin/sh -c '") || strings.Contains(acquireTransport, "\n") || strings.Count(acquireTransport, "'") != 2 {
 				t.Fatalf("workspace owner protocol is raw login-shell input: %q", acquireTransport[:min(len(acquireTransport), 80)])
 			}
-			acquireCmd := exec.Command(shellPath, append(shell.args, acquireTransport)...)
-			acquireCmd.Env = append(os.Environ(), "HOME="+home)
+			acquireCmd := command(acquireTransport)
+			acquireCmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
 			if out, err := acquireCmd.CombinedOutput(); err != nil || string(out) != "ACQUIRED" {
 				t.Fatalf("owner acquisition failed through %s: out=%q err=%v", shell.name, out, err)
 			}
 
+			privateCheck := `private_paths=$(find ` + shellQuote(ownerRoot) + ` \( -type d ! -perm 700 -o -type f ! -perm 600 \) -print) || exit 99; [ -z "$private_paths" ] || { printf 'non-private control paths: %s\n' "$private_paths" >&2; exit 99; }`
+			userDir := filepath.Join(workdir, "user-directory")
+			failedFile := filepath.Join(workdir, "nonzero.txt")
 			inputPath := filepath.Join(workdir, "preserved input.txt")
 			payload := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
 				HydrateGit:  true,
@@ -1287,7 +1298,7 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 					Tree:      strings.Repeat("2", 40),
 					Branch:    "main",
 				},
-			}) + " && cat > " + shellQuote(inputPath)
+			}) + " && " + privateCheck + "\nmkdir " + shellQuote(userDir) + " && cat > " + shellQuote(inputPath)
 			transportCommand := remoteWorkspaceOwnerPOSIXWitness(key, token, payload, true)
 			if !strings.HasPrefix(transportCommand, "exec /bin/sh -c '") || strings.Contains(transportCommand, "\n") || strings.Count(transportCommand, "'") != 2 {
 				t.Fatalf("workspace owner transport is raw login-shell input: %q", transportCommand[:min(len(transportCommand), 80)])
@@ -1295,8 +1306,8 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 			if len(transportCommand) >= 30_000 {
 				t.Fatalf("workspace owner transport is too large for a bounded Windows SSH command: %d bytes", len(transportCommand))
 			}
-			cmd := exec.Command(shellPath, append(shell.args, transportCommand)...)
-			cmd.Env = append(os.Environ(), "HOME="+home)
+			cmd := command(transportCommand)
+			cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
 			cmd.Stdin = strings.NewReader("preserved stdin\n")
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("assembled transport failed through %s: %v\n%s", shell.name, err, out)
@@ -1317,11 +1328,40 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 				}
 			}
 
-			nonzero := remoteWorkspaceOwnerPOSIXWitness(key, token, "exit 23")
-			nonzeroCmd := exec.Command(shellPath, append(shell.args, nonzero)...)
-			nonzeroCmd.Env = append(os.Environ(), "HOME="+home)
+			nonzero := remoteWorkspaceOwnerPOSIXWitness(key, token, privateCheck+"\nprintf failed > "+shellQuote(failedFile)+"; exit 23")
+			nonzeroCmd := command(nonzero)
+			nonzeroCmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
 			if out, err := nonzeroCmd.CombinedOutput(); err == nil || exitCode(err) != 23 {
 				t.Fatalf("nonzero child through %s: out=%q err=%v", shell.name, out, err)
+			}
+			mask, err := strconv.ParseUint(shell.mask, 8, 32)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for path, base := range map[string]os.FileMode{inputPath: 0o666, failedFile: 0o666, userDir: 0o777} {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := base &^ os.FileMode(mask)
+				if info.Mode().Perm() != want {
+					t.Errorf("caller umask %s: %s mode=%04o want=%04o", shell.mask, filepath.Base(path), info.Mode().Perm(), want)
+				}
+			}
+			entries, err = os.ReadDir(ownerRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if strings.Contains(entry.Name(), ".launcher.") || strings.Contains(entry.Name(), ".run.") || strings.HasSuffix(entry.Name(), ".child") {
+					t.Errorf("nonzero transport left temporary owner state %q", entry.Name())
+				}
+			}
+			request.Action = workspaceOwnerRelease
+			releaseCmd := command(remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetLinux}, request))
+			releaseCmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+			if out, err := releaseCmd.CombinedOutput(); err != nil || string(out) != "RELEASED" {
+				t.Fatalf("owner release through %s: out=%q err=%v", shell.name, out, err)
 			}
 		})
 	}
@@ -1337,7 +1377,8 @@ func TestWorkspaceOwnerPOSIXLauncherRejectsMalformedPayload(t *testing.T) {
 	marker := filepath.Join(home, "payload-ran")
 	script := "touch " + shellQuote(marker)
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
-	transport := remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded[:len(encoded)-1], len(script))
+	// Remove payload bytes, not just padding that permissive decoders can omit.
+	transport := remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded[:len(encoded)-4], len(script))
 	cmd := exec.Command("sh", "-c", transport)
 	cmd.Env = append(os.Environ(), "HOME="+home)
 	if out, err := cmd.CombinedOutput(); err == nil || exitCode(err) != 74 {

@@ -1,6 +1,7 @@
 package machine0
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"golang.org/x/crypto/ssh"
 )
 
 type backend struct {
@@ -89,6 +91,8 @@ func applyDefaults(cfg *Config) {
 func (b *backend) Spec() ProviderSpec { return b.spec }
 
 func (b *backend) SupportsRequestedLeaseID() bool { return true }
+
+func (b *backend) SupportsRequestedCheckpointID() bool { return true }
 
 func (b *backend) now() time.Time {
 	if b.rt.Clock != nil {
@@ -229,30 +233,98 @@ func (b *backend) preflightSSHKey(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if key == nil || !strings.EqualFold(strings.TrimSpace(key.Type), "PUBLIC") {
+	if key == nil {
+		keyRoot, err := machine0SSHKeyDirectory()
+		if err != nil {
+			return exit(2, "Machine0 has no default SSH key: set SSH_KEY_PATH or select an existing key with --machine0-key")
+		}
+		for _, name := range []string{"id_rsa", "id_rsa.pub"} {
+			keyPath := filepath.Join(keyRoot, name)
+			info, err := b.stat(keyPath)
+			if err == nil && info.Mode().IsRegular() {
+				continue
+			}
+			if err == nil {
+				err = errors.New("not a regular file")
+			}
+			return exit(2, "Machine0 has no default SSH key and cannot use legacy key file %q: %v; provide both id_rsa and id_rsa.pub in SSH_KEY_PATH, or select an existing key with --machine0-key", keyPath, err)
+		}
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(key.Type), "PUBLIC") {
 		return nil
 	}
 	fileName := strings.TrimSpace(key.FileName)
 	if fileName == "" || filepath.IsAbs(fileName) || fileName == "." || fileName == ".." || strings.ContainsAny(fileName, `/\`) || filepath.Base(fileName) != fileName {
 		return exit(2, "Machine0 PUBLIC SSH key %q has no usable local private-key filename; select a managed key with --machine0-key <managed-key-name>", blank(key.Name, "<default>"))
 	}
-	keyRoot := strings.TrimSpace(os.Getenv("SSH_KEY_PATH"))
-	if keyRoot == "" {
-		home, homeErr := os.UserHomeDir()
-		if homeErr != nil || strings.TrimSpace(home) == "" {
-			return exit(2, "resolve private key for Machine0 PUBLIC SSH key %q: set SSH_KEY_PATH or select --machine0-key <managed-key-name>", blank(key.Name, "<default>"))
-		}
-		keyRoot = filepath.Join(home, ".ssh")
+	keyRoot, err := machine0SSHKeyDirectory()
+	if err != nil {
+		return exit(2, "resolve private key for Machine0 PUBLIC SSH key %q: set SSH_KEY_PATH or select --machine0-key <managed-key-name>", blank(key.Name, "<default>"))
 	}
 	keyPath := filepath.Join(keyRoot, fileName)
 	info, err := b.stat(keyPath)
 	if err == nil && !info.IsDir() {
+		// Special files are unverified: extraction can block opening a FIFO/device.
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		registered := machine0BarePublicKey(key.PublicKey)
+		if registered == nil {
+			return nil
+		}
+		// Like native Machine0 SSH, compare the private file, not its .pub sidecar.
+		// Failed noninteractive extraction (including encrypted keys) is unknown.
+		result, extractErr := b.rt.Exec.Run(ctx, LocalCommandRequest{
+			Name: "ssh-keygen", Args: []string{"-y", "-P", "", "-f", keyPath},
+			MaxCapturedOutputBytes: 64 << 10,
+		})
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		if extractErr == nil && result.ExitCode == 0 {
+			if local := machine0BarePublicKey(result.Stdout); local != nil && !bytes.Equal(local.Marshal(), registered.Marshal()) {
+				return exit(2, "Machine0 PUBLIC SSH key does not match the local private key; provide the matching local key or select the intended key with --machine0-key")
+			}
+		}
 		return nil
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return exit(2, "inspect private key for Machine0 PUBLIC SSH key %q at %q: %v", blank(key.Name, "<default>"), keyPath, err)
 	}
 	return exit(2, "Machine0 PUBLIC SSH key %q has no local private key at %q; select a managed key with --machine0-key <managed-key-name>", blank(key.Name, "<default>"), keyPath)
+}
+
+func machine0SSHKeyDirectory() (string, error) {
+	if root := strings.TrimSpace(os.Getenv("SSH_KEY_PATH")); root != "" {
+		return root, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", errors.New("user home unavailable")
+	}
+	return filepath.Join(home, ".ssh"), nil
+}
+
+// Certificates, options and multiple records need more than a bare-key comparison.
+func machine0BarePublicKey(value string) ssh.PublicKey {
+	value = strings.TrimSpace(value)
+	if strings.ContainsAny(value, "\r\n") {
+		return nil
+	}
+	key, _, options, _, err := ssh.ParseAuthorizedKey([]byte(value))
+	if err != nil || len(options) != 0 {
+		return nil
+	}
+	// ParseAuthorizedKey can discard an empty option prefix such as ", ".
+	fields := strings.Fields(value)
+	if len(fields) < 2 || fields[0] != key.Type() {
+		return nil
+	}
+	if _, certificate := key.(*ssh.Certificate); certificate {
+		return nil
+	}
+	return key
 }
 
 func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
@@ -265,9 +337,31 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if claimed {
 		lookup = firstNonBlank(claim.Labels["machine0_name"], claim.CloudID, lookup)
 	}
-	item, err := b.api.Get(ctx, lookup)
-	if err != nil {
-		return LeaseTarget{}, err
+	var item machine
+	if !claimed && core.IsCanonicalLeaseID(lookup) {
+		machines, err := b.api.List(ctx)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		suffix := machine0LeaseSuffix(lookup)
+		for _, candidate := range machines {
+			if !strings.HasPrefix(candidate.Name, "crabbox-") || !strings.HasSuffix(candidate.Name, suffix) {
+				continue
+			}
+			if item.Name != "" {
+				return LeaseTarget{}, exit(4, "multiple Machine0 machines match lease %s", lookup)
+			}
+			item = candidate
+		}
+		if item.Name == "" {
+			return LeaseTarget{}, exit(4, "lease/server not found: %s", lookup)
+		}
+		return LeaseTarget{}, exit(4, "machine0 lease %s has no local claim; candidate %q matches only a short name hash: inspect the machine and use its explicit name with --reclaim to adopt it", lookup, item.Name)
+	} else {
+		item, err = b.api.Get(ctx, lookup)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
 	}
 	cfg := effectiveMachine0Config(baseCfg, item)
 	if claimed && claim.CloudID != "" && claim.CloudID != item.ID {
@@ -343,18 +437,50 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	return views, nil
 }
 
-func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
-	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
+func (b *backend) AuthorizeStatusTouchClaim(_ context.Context, lease LeaseTarget, claim LeaseClaim) error {
+	resourceID := strings.TrimSpace(lease.Server.CloudID)
+	if !core.IsCanonicalLeaseID(lease.LeaseID) || claim.LeaseID != lease.LeaseID ||
+		lease.Server.Provider != providerName || !isMachine0ClaimProvider(claim.Provider) ||
+		resourceID == "" || lease.Server.ImmutableID != resourceID || claim.CloudImmutableID != resourceID {
+		return exit(4, "refusing machine0 lifecycle touch for lease=%s resource=%s: claim does not match the canonical lease, provider, or immutable Machine0 identity", lease.LeaseID, blank(resourceID, "<empty>"))
 	}
-	original := server.Labels
-	server.Labels = touchDirectLeaseLabels(original, b.configForRun(), req.State, b.now())
+	if err := validateMachineClaimOwnership(claim, machine{ID: resourceID}); err != nil {
+		return exit(4, "refusing machine0 lifecycle touch for lease=%s resource=%s: %v", lease.LeaseID, resourceID, err)
+	}
+	return nil
+}
+
+func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
+	if !set || !exists {
+		return Server{}, exit(4, "machine0 lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
+	}
+	if err := b.AuthorizeStatusTouchClaim(ctx, req.Lease, expected); err != nil {
+		return Server{}, err
+	}
+	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
+		return Server{}, exit(2, "machine0 lease %s idle timeout override must be positive", req.Lease.LeaseID)
+	}
+
+	cfg := b.configForRun()
+	if expected.IdleTimeoutSeconds > 0 {
+		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+	}
+	labels := shared.CloneLabels(expected.Labels)
 	for _, key := range machineLabelKeys {
-		if value := original[key]; value != "" {
-			server.Labels[key] = value
+		if value := req.Lease.Server.Labels[key]; value != "" {
+			labels[key] = value
 		}
 	}
+	now := b.now()
+	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	if err != nil {
+		return Server{}, err
+	}
+	server := req.Lease.Server
+	server.Labels = updated.Labels
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
@@ -515,7 +641,10 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	}
 	probeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	results := make(chan probeResult, 3)
+	results := make(chan probeResult, 4)
+	go func() {
+		results <- probeResult{err: b.preflightSSHKey(probeCtx, b.configForRun().Machine0.Key)}
+	}()
 	go func() {
 		version, err := b.api.Version(probeCtx)
 		results <- probeResult{version: version, err: err}
@@ -532,7 +661,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	var sizes []machineSize
 	var machines []machine
 	var probeErr error
-	for range 3 {
+	for range 4 {
 		result := <-results
 		if result.err != nil {
 			if probeErr == nil {
@@ -558,7 +687,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	if req.ProbeSSH {
 		probe = "requires_running_lease"
 	}
-	return DoctorResult{Provider: providerName, Message: fmt.Sprintf("cli=ready auth=ready control_plane=ready inventory=ready mutation=false leases=%d sizes=%d runtime=%s version=%s", len(machines), len(sizes), probe, firstLine(version))}, nil
+	return DoctorResult{Provider: providerName, Message: fmt.Sprintf("cli=ready auth=ready control_plane=ready inventory=ready ssh_key_prerequisites=checked mutation=false leases=%d sizes=%d runtime=%s version=%s", len(machines), len(sizes), probe, firstLine(version))}, nil
 }
 
 func (b *backend) SizeCatalog(ctx context.Context, _ bool) ([]core.ProviderSize, error) {
@@ -994,17 +1123,21 @@ func machine0MachineName(leaseID, slug string) string {
 	if base == "" {
 		base = core.NormalizeLeaseSlug(strings.ReplaceAll(leaseID, "_", "-"))
 	}
-	hash := fnv.New32a()
-	_, _ = hash.Write([]byte(leaseID))
-	suffix := fmt.Sprintf("%08x", hash.Sum32())
-	maxBase := machine0MachineNameMaxLength - len("crabbox--") - len(suffix)
+	suffix := machine0LeaseSuffix(leaseID)
+	maxBase := machine0MachineNameMaxLength - len("crabbox-") - len(suffix)
 	if len(base) > maxBase {
 		base = strings.Trim(base[:maxBase], "-")
 	}
 	if base == "" {
 		base = "vm"
 	}
-	return "crabbox-" + base + "-" + suffix
+	return "crabbox-" + base + suffix
+}
+
+func machine0LeaseSuffix(leaseID string) string {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(leaseID))
+	return fmt.Sprintf("-%08x", hash.Sum32())
 }
 
 func shouldCleanupMachine0(server Server, claim LeaseClaim, hasClaim bool, now time.Time) (bool, string) {

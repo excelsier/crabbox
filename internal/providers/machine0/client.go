@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -15,9 +16,12 @@ import (
 const (
 	maxCLIOutput                    = 16 << 20
 	machine0RateLimitMessage        = "rate limited. please wait a moment and try again."
+	machine0UnavailableMessage      = "the cloud provider is temporarily unavailable. please try again shortly."
 	machine0ReadRetryFallback       = 5 * time.Second
 	machine0ReadRetryMinimumCadence = time.Second
 )
+
+var machine0UUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type machine0API interface {
 	Version(context.Context) (string, error)
@@ -184,12 +188,12 @@ func (c *client) runRead(ctx context.Context, args ...string) (LocalCommandResul
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			return result, ctxErr
 		}
-		if !machine0ReadRateLimited(result, err) {
+		if !machine0ReadUnavailable(result, err) {
 			return result, err
 		}
 		if !warned {
 			if c.rt.Stderr != nil {
-				_, _ = fmt.Fprintf(c.rt.Stderr, "machine0 read rate limited; retrying every %s until the current operation ends\n", delay)
+				_, _ = fmt.Fprintf(c.rt.Stderr, "machine0 read unavailable; retrying every %s until the current operation ends\n", delay)
 			}
 			warned = true
 		}
@@ -212,9 +216,9 @@ func machine0ReadRetryDelay(configured time.Duration) time.Duration {
 	return configured
 }
 
-func machine0ReadRateLimited(result LocalCommandResult, err error) bool {
+func machine0ReadUnavailable(result LocalCommandResult, err error) bool {
 	detail := strings.ToLower(strings.Join([]string{result.Stdout, result.Stderr, fmt.Sprint(err)}, "\n"))
-	return strings.Contains(detail, machine0RateLimitMessage)
+	return strings.Contains(detail, machine0RateLimitMessage) || strings.Contains(detail, machine0UnavailableMessage)
 }
 
 func decodeJSON(output string, target any) error {
@@ -259,6 +263,36 @@ func (c *client) List(ctx context.Context) ([]machine, error) {
 }
 
 func (c *client) Get(ctx context.Context, name string) (machine, error) {
+	var id string
+	if machine0UUIDPattern.MatchString(name) {
+		// Native UUID get uses an unavailable procedure in CLI 1.0.164.
+		// Resolve a transport name from inventory, then verify full detail identity.
+		id, name = name, ""
+		machines, err := c.List(ctx)
+		if err != nil {
+			return machine{}, err
+		}
+		if machines == nil {
+			return machine{}, exit(5, "invalid machine0 ls --json for UUID lookup: expected an array")
+		}
+		for i, candidate := range machines {
+			if !machine0UUIDPattern.MatchString(candidate.ID) {
+				return machine{}, exit(5, "invalid machine0 ls --json item %d: missing or malformed UUID", i)
+			}
+			if strings.EqualFold(candidate.ID, id) {
+				if name != "" {
+					return machine{}, exit(5, "multiple Machine0 inventory entries match UUID %s", id)
+				}
+				name = candidate.Name
+			}
+		}
+		if name == "" {
+			return machine{}, exit(4, "Machine0 UUID %s is absent from current authorized inventory", id)
+		}
+		if machine0UUIDPattern.MatchString(name) {
+			return machine{}, exit(5, "invalid machine name in Machine0 inventory for UUID %s: %q", id, name)
+		}
+	}
 	result, err := c.runRead(ctx, "get", name, "--json")
 	if err != nil {
 		return machine{}, err
@@ -270,38 +304,48 @@ func (c *client) Get(ctx context.Context, name string) (machine, error) {
 	if err := validateMachine(item, true); err != nil {
 		return machine{}, exit(5, "invalid machine0 get %s --json: %v", name, err)
 	}
+	if id != "" && (!strings.EqualFold(item.ID, id) || item.Name != name) {
+		return machine{}, exit(5, "Machine0 lookup identity changed: expected id=%s name=%q, found id=%s name=%q", id, name, item.ID, item.Name)
+	}
 	return item, nil
 }
 
 func (c *client) SelectedKey(ctx context.Context, name string) (*machineKey, error) {
-	if name = strings.TrimSpace(name); name != "" {
-		result, err := c.runRead(ctx, "keys", "get", name, "--json")
+	if name = strings.TrimSpace(name); name == "" {
+		result, err := c.runRead(ctx, "keys", "ls", "--json")
 		if err != nil {
 			return nil, err
 		}
-		var key machineKey
-		if err := decodeJSON(result.Stdout, &key); err != nil {
-			return nil, exit(5, "parse machine0 keys get %s --json: %v", name, err)
+		var keys []machineKey
+		if err := decodeJSON(result.Stdout, &keys); err != nil {
+			return nil, exit(5, "parse machine0 keys ls --json: %v", err)
 		}
-		if strings.TrimSpace(key.Name) != name {
-			return nil, exit(5, "machine0 key lookup returned mismatched key name: expected %s, found %s", name, blank(key.Name, "<empty>"))
+		for _, key := range keys {
+			if key.IsDefault {
+				name = strings.TrimSpace(key.Name)
+				if name == "" {
+					return nil, exit(5, "machine0 default SSH key has no name")
+				}
+				break
+			}
 		}
-		return &key, nil
+		if name == "" {
+			return nil, nil
+		}
 	}
-	result, err := c.runRead(ctx, "keys", "ls", "--json")
+	// List summaries can omit fileName; both selections need the full key details.
+	result, err := c.runRead(ctx, "keys", "get", name, "--json")
 	if err != nil {
 		return nil, err
 	}
-	var keys []machineKey
-	if err := decodeJSON(result.Stdout, &keys); err != nil {
-		return nil, exit(5, "parse machine0 keys ls --json: %v", err)
+	var key machineKey
+	if err := decodeJSON(result.Stdout, &key); err != nil {
+		return nil, exit(5, "parse machine0 keys get %s --json: %v", name, err)
 	}
-	for index := range keys {
-		if keys[index].IsDefault {
-			return &keys[index], nil
-		}
+	if strings.TrimSpace(key.Name) != name {
+		return nil, exit(5, "machine0 key lookup returned mismatched key name: expected %s, found %s", name, blank(key.Name, "<empty>"))
 	}
-	return nil, nil
+	return &key, nil
 }
 
 func validateMachine(item machine, requireID bool) error {

@@ -207,7 +207,10 @@ func TestAWSFixedAcquireReplaysSameLeaseAndRejectsIntentDrift(t *testing.T) {
 	defer restore()
 	cfg := fixedAWSTestConfig()
 	repo := t.TempDir()
-	req := AcquireRequest{Repo: core.Repo{Root: repo}, Keep: true, RequestedLeaseID: "cbx_abcdef123456", RequestedSlug: "fixed-aws"}
+	req := AcquireRequest{
+		Repo: core.Repo{Root: repo}, Keep: true, RequestedLeaseID: "cbx_abcdef123456",
+		RequestedCheckpointID: "chk_fixed_aws", RequestedSlug: "fixed-aws",
+	}
 
 	first := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
 	lease, err := first.Acquire(context.Background(), req)
@@ -221,6 +224,28 @@ func TestAWSFixedAcquireReplaysSameLeaseAndRejectsIntentDrift(t *testing.T) {
 	}
 	if lease.LeaseID != req.RequestedLeaseID || replayed.Server.CloudID != lease.Server.CloudID || fake.createCalls != 1 {
 		t.Fatalf("lease=%#v replay=%#v creates=%d", lease, replayed, fake.createCalls)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.CheckpointID != req.RequestedCheckpointID {
+		t.Fatalf("fixed AWS checkpoint intent=%#v err=%v", claim.FixedCreateIntent, err)
+	}
+	for _, checkpointID := range []string{"chk_other_aws", ""} {
+		drifted := req
+		drifted.RequestedCheckpointID = checkpointID
+		_, err := second.Acquire(context.Background(), drifted)
+		if err == nil || !strings.Contains(err.Error(), req.RequestedCheckpointID) || !strings.Contains(err.Error(), blank(checkpointID, "<none>")) {
+			t.Fatalf("checkpoint drift=%q err=%v", checkpointID, err)
+		}
+		if fake.createCalls != 1 {
+			t.Fatalf("creates=%d after checkpoint drift, want 1", fake.createCalls)
+		}
+	}
+	for _, acquired := range []LeaseTarget{lease, replayed} {
+		for _, want := range []string{"timeout 20m cloud-init status --wait", "/usr/local/bin/crabbox-ready"} {
+			if !strings.Contains(acquired.SSH.ReadyCheck, want) {
+				t.Fatalf("fixed AWS acquisition/replay ready check=%q, missing %q", acquired.SSH.ReadyCheck, want)
+			}
+		}
 	}
 
 	drifted := req
@@ -523,9 +548,7 @@ func TestAWSFixedReleasePersistsTerminalTombstoneAndRejectsReplay(t *testing.T) 
 	if intent.Version != fixedAWSCreateIntentVersion || intent.Fingerprint == "" || intent.ProviderScope == "" || intent.Slug != req.RequestedSlug || intent.State != fixedAWSIntentReleased {
 		t.Fatalf("terminal intent=%#v", intent)
 	}
-	if claim.CloudID != "" || claim.Labels != nil || claim.SSHHost != "" || len(intent.Attempt) != 0 || len(intent.FailedAttempts) != 0 {
-		t.Fatalf("terminal tombstone retained live resource state: claim=%#v", claim)
-	}
+	assertAWSReceiptIdentity(t, claim, liveClaim)
 
 	if err := backend.cleanupOrphanedAWSClaims(context.Background(), false); err != nil {
 		t.Fatal(err)
@@ -737,6 +760,9 @@ func TestAWSFixedAcquireTerminalizesDefinitiveProviderRejection(t *testing.T) {
 	}
 	if err := fixedAWSLeaseKind.ValidateTerminalClaim(claim, core.LeaseClaim{}, req.RequestedLeaseID, nil); err != nil {
 		t.Fatalf("terminal claim: %v", err)
+	}
+	if _, err := backend.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true}); err == nil {
+		t.Fatal("no-allocation rejection became a successful stop receipt")
 	}
 	keyPath, err := core.TestboxKeyPath(req.RequestedLeaseID)
 	if err != nil {
@@ -1036,10 +1062,19 @@ func TestAWSAcquireBindsImmutableProviderKeyID(t *testing.T) {
 	fake := &fakeAWSClient{}
 	oldClient := newAWSClient
 	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+	oldEnsure := ensureAWSSSHCIDRs
+	detections := 0
+	ensureAWSSSHCIDRs = func(_ context.Context, cfg *Config) {
+		detections++
+		if len(cfg.AWSSSHCIDRs) == 0 {
+			cfg.AWSSSHCIDRs = []string{"198.51.100.7/32"}
+		}
+	}
 	oldBootstrap := bootstrapAWSWindowsDesktop
 	bootstrapAWSWindowsDesktop = func(context.Context, Config, *SSHTarget, string, io.Writer) error { return nil }
 	t.Cleanup(func() {
 		newAWSClient = oldClient
+		ensureAWSSSHCIDRs = oldEnsure
 		bootstrapAWSWindowsDesktop = oldBootstrap
 	})
 
@@ -1047,6 +1082,14 @@ func TestAWSAcquireBindsImmutableProviderKeyID(t *testing.T) {
 	lease, err := backend.acquireOnce(context.Background(), false, "bound-key")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if detections != 1 || len(fake.createCfg.AWSSSHCIDRs) != 1 || fake.createCfg.AWSSSHCIDRs[0] != "198.51.100.7/32" {
+		t.Fatalf("direct AWS outbound CIDR detections=%d provisioned CIDRs=%v, want one detection and [198.51.100.7/32]", detections, fake.createCfg.AWSSSHCIDRs)
+	}
+	for _, want := range []string{"timeout 20m cloud-init status --wait", "/usr/local/bin/crabbox-ready"} {
+		if !strings.Contains(lease.SSH.ReadyCheck, want) {
+			t.Fatalf("direct AWS acquisition ready check=%q, missing %q", lease.SSH.ReadyCheck, want)
+		}
 	}
 	keyName := core.ServerProviderKey(lease.Server)
 	if got, want := lease.Server.Labels["aws_key_pair_id"], "key-id-for-"+keyName; got != want {

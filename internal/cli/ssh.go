@@ -84,7 +84,7 @@ func sshTargetForLease(cfg Config, host, user, port string) SSHTarget {
 	if port == "" {
 		port = cfg.SSHPort
 	}
-	return SSHTarget{
+	target := SSHTarget{
 		User:             user,
 		Host:             host,
 		Key:              cfg.SSHKey,
@@ -94,6 +94,12 @@ func sshTargetForLease(cfg Config, host, user, port string) SSHTarget {
 		WindowsMode:      cfg.WindowsMode,
 		ChildEnvDenylist: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
 	}
+	if provider, err := ProviderFor(cfg.Provider); err == nil {
+		if configurer, ok := provider.(ProviderSSHTargetConfigurer); ok {
+			configurer.ConfigureSSHTarget(&target, sshReadyCommand(target))
+		}
+	}
+	return target
 }
 
 // PreserveExternalDesktopChildEnvironmentBoundary records a valid, trusted or
@@ -479,6 +485,41 @@ type sshTransportPreparation struct {
 	direct  io.ReadSeeker
 }
 
+const sshMuxDescriptorFailure = "mux_client_request_session: send fds failed"
+
+type sshMuxFailureDetector struct {
+	log      []byte
+	overflow bool
+}
+
+func (d *sshMuxFailureDetector) Write(data []byte) (int, error) {
+	if len(d.log)+len(data) > 512 {
+		d.overflow = true
+	} else if !d.overflow {
+		d.log = append(d.log, data...)
+	}
+	return len(data), nil
+}
+
+func (d *sshMuxFailureDetector) failed() bool {
+	if d.overflow {
+		return false
+	}
+	lines := strings.Split(strings.TrimSuffix(strings.ReplaceAll(string(d.log), "\r\n", "\n"), "\n"), "\n")
+	// Even a local OpenSSH log can embed server-supplied disconnect text.
+	// Require the complete two-line failure, with no surrounding log records.
+	if len(lines) != 2 || lines[1] != sshMuxDescriptorFailure {
+		return false
+	}
+	for fd := 0; fd < 3; fd++ {
+		prefix := fmt.Sprintf("mm_send_fd: sendmsg(%d): ", fd)
+		if strings.HasPrefix(lines[0], prefix) && len(lines[0]) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func prepareSSHTransport(target SSHTarget, remote workspaceOwnerRemotePreparation, payload []byte, direct io.ReadSeeker, payloadSize int64, hasInput bool, waitTimeout time.Duration) (sshTransportPreparation, error) {
 	// Only owner-expanded WSL2 commands need stdin staging; every other target
 	// keeps its established argv and input transport.
@@ -515,6 +556,20 @@ func prepareSSHTransport(target SSHTarget, remote workspaceOwnerRemotePreparatio
 }
 
 func (p *sshTransportPreparation) run(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer) error {
+	multiplexed := runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster
+	for attempt := 0; ; attempt++ {
+		probe := target
+		if attempt == 2 {
+			probe.NoControlMaster = true
+		}
+		muxFailure, err := p.runOnce(ctx, probe, connectTimeout, connectionAttempts, stdout, stderr, multiplexed && attempt < 2)
+		if err == nil || ctx.Err() != nil || exitCode(err) != 255 || !muxFailure || attempt == 2 {
+			return err
+		}
+	}
+}
+
+func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer, captureLocalDiagnostics bool) (muxFailure bool, err error) {
 	args := sshArgsNoInputWithOptions(target, p.command, connectTimeout, connectionAttempts)
 	if p.input != nil || p.direct != nil {
 		args = sshArgsWithOptions(target, p.command, connectTimeout, connectionAttempts)
@@ -522,10 +577,13 @@ func (p *sshTransportPreparation) run(ctx context.Context, target SSHTarget, con
 	cmd := sshCommandContext(ctx, target, args...)
 	input, err := p.reset()
 	if err != nil {
-		return err
+		return false, err
 	}
 	cmd.Stdin = input
-	return runSSHCommand(cmd, stdout, stderr)
+	if captureLocalDiagnostics {
+		return runSSHCommandWithLocalDiagnostics(cmd, stdout, stderr)
+	}
+	return false, runSSHCommand(cmd, stdout, stderr)
 }
 
 func (p *sshTransportPreparation) reset() (io.Reader, error) {
@@ -707,6 +765,10 @@ func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, re
 }
 
 func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) (output string, err error) {
+	return runSSHCombinedOutputLimit(ctx, target, remote, 0)
+}
+
+func runSSHCombinedOutputLimit(ctx context.Context, target SSHTarget, remote string, maxBytes int) (output string, err error) {
 	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
 	if err != nil {
 		return "", err
@@ -729,7 +791,7 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 		// Crabbox's SSH helpers intentionally execute commands assembled by
 		// typed remote-command builders. Callers must shell-quote user data
 		// before it reaches this boundary; see remoteCommand/shellQuote tests.
-		var out synchronizedBuffer
+		out := synchronizedBuffer{limit: maxBytes}
 		err := transport.run(ctx, probe, "10", "3", &out, &out)
 		if err == nil {
 			return strings.TrimSpace(out.String()), nil
@@ -746,10 +808,14 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 var idempotentSSHRetryDelay = 2 * time.Second
 
 func runIdempotentSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration) (string, error) {
+	return runIdempotentSSHCombinedOutputLimit(ctx, target, remote, retryDelay, 0)
+}
+
+func runIdempotentSSHCombinedOutputLimit(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration, maxBytes int) (string, error) {
 	var lastOut string
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		lastOut, lastErr = runSSHCombinedOutput(ctx, target, remote)
+		lastOut, lastErr = runSSHCombinedOutputLimit(ctx, target, remote, maxBytes)
 		if lastErr == nil || !shouldRetrySSHPort(lastErr) || attempt == 1 {
 			return lastOut, lastErr
 		}
@@ -928,25 +994,39 @@ func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {
 }
 
 type synchronizedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
 }
 
 func (b *synchronizedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Write(data)
+	n := len(data)
+	if b.limit > 0 && len(data) > b.limit-b.buf.Len() {
+		data = data[:b.limit-b.buf.Len()]
+		b.truncated = true
+	}
+	_, _ = b.buf.Write(data)
+	return n, nil
 }
 
 func (b *synchronizedBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.truncated {
+		return nil
+	}
 	return bytes.Clone(b.buf.Bytes())
 }
 
 func (b *synchronizedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.truncated {
+		return ""
+	}
 	return b.buf.String()
 }
 
@@ -1300,7 +1380,8 @@ func wsl2StdinScriptCommandWithWaitTimeout(inputSize int, waitTimeout time.Durat
 func wsl2StdinScriptCommandWithPayload(scriptSize, payloadSize int, waitTimeout time.Duration) string {
 	// Keep staging, execution, and cleanup in one WSL process so the timeout
 	// covers the lifecycle. The frame accounts for .NET's stdin preamble, and
-	// the marker lets post-exit cleanup preserve collisions.
+	// the marker lets post-exit cleanup preserve collisions. Restore the incoming
+	// umask before execution so private staging does not restrict user-created files.
 	wait := `$process.WaitForExit()
   $code = $process.ExitCode`
 	copyScript := `[Console]::OpenStandardInput().CopyTo($process.StandardInput.BaseStream)`
@@ -1341,7 +1422,7 @@ $cleanupAllowed = $true
 $psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
 $psi.UseShellExecute = $false
 $psi.RedirectStandardInput = $true
-$psi.Arguments = '--exec sh -c "set -u;umask 077;dir=$1;script_expected=$2;payload_expected=$3;preamble=$4;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/framed||exit;test $(wc -c <$dir/framed) = $((script_expected+payload_expected+preamble))||exit;dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble count=$script_expected 2>/dev/null||exit;dd if=$dir/framed of=$dir/payload bs=1 skip=$((preamble+script_expected)) count=$payload_expected 2>/dev/null||exit;rm -f -- $dir/framed;code=0;bash $dir/script.sh <$dir/payload||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ` + strconv.Itoa(scriptSize) + ` ` + strconv.Itoa(payloadSize) + ` ' + $preamble
+$psi.Arguments = '--exec sh -c "set -u;mask=$(umask);umask 077;dir=$1;script_expected=$2;payload_expected=$3;preamble=$4;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/framed||exit;test $(wc -c <$dir/framed) = $((script_expected+payload_expected+preamble))||exit;dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble count=$script_expected 2>/dev/null||exit;dd if=$dir/framed of=$dir/payload bs=1 skip=$((preamble+script_expected)) count=$payload_expected 2>/dev/null||exit;rm -f -- $dir/framed;code=0;umask $mask;bash $dir/script.sh <$dir/payload||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ` + strconv.Itoa(scriptSize) + ` ` + strconv.Itoa(payloadSize) + ` ' + $preamble
 $process = [System.Diagnostics.Process]::Start($psi)
 try {
   try {
@@ -1998,6 +2079,9 @@ func remoteGitSeed(workdir string, plan gitCoherencePlan) string {
 	}
 	parent := filepath.ToSlash(filepath.Dir(workdir))
 	script := `set -e
+printf 'crabbox-git-seed phase=prerequisite\n'
+command -v git >/dev/null 2>&1 || exit 127
+printf 'crabbox-git-seed phase=prepare\n'
 workdir=` + shellQuote(workdir) + `
 expected_origin=` + shellQuote(plan.RemoteURL) + `
 expected_tree=` + shellQuote(plan.Tree) + `
@@ -2005,6 +2089,7 @@ expected_tree=` + shellQuote(plan.Tree) + `
 if [ -d "$workdir" ]; then
   cd "$workdir"
   if usable_git_workspace; then
+    printf 'crabbox-git-seed phase=origin\n'
     repair_origin
     exit 0
   fi
@@ -2013,15 +2098,20 @@ mkdir -p ` + shellQuote(parent) + `
 tmp="$(mktemp -d ` + shellQuote(parent+"/.seed.XXXXXX") + `)"
 cleanup_seed() { rm -rf -- "$tmp"; }
 trap cleanup_seed EXIT
-git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp" >/dev/null 2>&1
+printf 'crabbox-git-seed phase=clone\n'
+git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp"
+printf 'crabbox-git-seed phase=checkout\n'
 git -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `
+printf 'crabbox-git-seed phase=verify\n'
 [ "$(git -C "$tmp" rev-parse --verify HEAD^{commit})" = ` + shellQuote(plan.Target) + ` ]
 cd "$tmp"
 usable_git_workspace
 if [ -n "$expected_tree" ]; then
   [ "$(git write-tree)" = "$expected_tree" ]
 fi
+printf 'crabbox-git-seed phase=origin\n'
 repair_origin
+printf 'crabbox-git-seed phase=publish\n'
 cd /
 rm -rf -- "$workdir"
 mv -- "$tmp" "$workdir"

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -506,6 +507,84 @@ func TestCoordinatorAcquireSendsTailscaleHostnameTemplate(t *testing.T) {
 	}
 	if gotHostname != "lease-{slug}" {
 		t.Fatalf("tailscaleHostname=%q, want template for worker-side final slug render", gotHostname)
+	}
+}
+
+func TestCoordinatorAcquirePreservesAWSSSHCIDROwnership(t *testing.T) {
+	previousDetector := detectOutboundIPv4CIDRFunc
+	defer func() { detectOutboundIPv4CIDRFunc = previousDetector }()
+
+	for _, test := range []struct {
+		name           string
+		cidrs          []string
+		wantCIDRs      []string
+		detectionError error
+		wantDetections int
+		pinned         bool
+	}{
+		{
+			name:           "unpinned request preserves detected outbound IPv4",
+			wantCIDRs:      []string{"192.0.2.44/32"},
+			wantDetections: 1,
+		},
+		{
+			name:           "unpinned request tolerates unavailable outbound IPv4",
+			detectionError: errors.New("outbound IPv4 unavailable"),
+			wantDetections: 1,
+		},
+		{
+			name:      "explicit CIDRs stay pinned",
+			cidrs:     []string{"198.51.100.7/32", "203.0.113.0/24"},
+			wantCIDRs: []string{"198.51.100.7/32", "203.0.113.0/24"},
+			pinned:    true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			detections := 0
+			detectOutboundIPv4CIDRFunc = func(context.Context) (string, error) {
+				detections++
+				return "192.0.2.44/32", test.detectionError
+			}
+
+			var body struct {
+				CIDRs  []string `json:"awsSSHCIDRs"`
+				Pinned bool     `json:"awsSSHCIDRsPinned"`
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/leases" {
+					http.NotFound(w, r)
+					return
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				http.Error(w, `{"error":"stop after request capture"}`, http.StatusBadRequest)
+			}))
+			defer server.Close()
+
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			cfg.TargetOS = targetLinux
+			cfg.Coordinator = server.URL
+			cfg.CoordToken = "user-token"
+			cfg.AWSSSHCIDRs = test.cidrs
+			coord, _, err := newCoordinatorClient(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: io.Discard}}
+			if _, err := backend.acquireOnce(context.Background(), false, "cidr-source"); err == nil || !strings.Contains(err.Error(), "stop after request capture") {
+				t.Fatalf("err=%v, want captured request error", err)
+			}
+			if detections != test.wantDetections {
+				t.Fatalf("coordinator outbound-IP detections=%d, want %d", detections, test.wantDetections)
+			}
+			if !slices.Equal(body.CIDRs, test.wantCIDRs) || body.Pinned != test.pinned {
+				t.Fatalf("awsSSHCIDRs=%v awsSSHCIDRsPinned=%t, want %v and %t", body.CIDRs, body.Pinned, test.wantCIDRs, test.pinned)
+			}
+		})
 	}
 }
 
@@ -1653,6 +1732,40 @@ func TestLeaseToServerTargetProjectsCanonicalLeaseLabels(t *testing.T) {
 	}
 }
 
+func TestLeaseToServerTargetAppliesAWSCloudInitReadiness(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		provider      string
+		leaseProvider string
+		targetOS      string
+		wantCloudInit bool
+	}{
+		{name: "AWS Linux", provider: "aws", leaseProvider: "aws", targetOS: targetLinux, wantCloudInit: true},
+		{name: "authoritative AWS lease", provider: "hetzner", leaseProvider: "aws", targetOS: targetLinux, wantCloudInit: true},
+		{name: "AWS Windows", provider: "aws", leaseProvider: "aws", targetOS: targetWindows},
+		{name: "AWS macOS", provider: "aws", leaseProvider: "aws", targetOS: targetMacOS},
+		{name: "other Linux provider", provider: "hetzner", leaseProvider: "hetzner", targetOS: targetLinux},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = test.provider
+			cfg.TargetOS = targetLinux
+			_, target, _ := leaseToServerTarget(CoordinatorLease{
+				ID: "cbx_123", Provider: test.leaseProvider, TargetOS: test.targetOS,
+				Host: "203.0.113.10", SSHUser: "crabbox", SSHPort: "22",
+			}, cfg)
+			if test.wantCloudInit {
+				want := "timeout 20m cloud-init status --wait >/tmp/crabbox-cloud-init.log 2>&1 && " + sshReadyCommand(SSHTarget{TargetOS: targetLinux})
+				if target.ReadyCheck != want {
+					t.Fatalf("coordinator AWS ready check=%q, want current-boot cloud-init followed by canonical readiness %q", target.ReadyCheck, want)
+				}
+			} else if target.ReadyCheck != "" {
+				t.Fatalf("ready check=%q, want unchanged default", target.ReadyCheck)
+			}
+		})
+	}
+}
+
 func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
@@ -2087,6 +2200,64 @@ func TestStopCoordinatorInspectFailureKeepsProviderBinding(t *testing.T) {
 	}
 	if releaseBody["expectedProvider"] != "aws" {
 		t.Fatalf("release body=%#v, want expectedProvider=aws", releaseBody)
+	}
+}
+
+func TestStopForceCoordinatorRequiresLiveExactLease(t *testing.T) {
+	tests := []struct {
+		name        string
+		id          string
+		leaseStatus int
+		provider    string
+		wantErr     string
+		wantRelease int
+	}{
+		{name: "reject slug", id: "friendly-slug", wantErr: "requires an exact coordinator lease id"},
+		{name: "reject failed inspection", id: "cbx_abcdef123456", leaseStatus: http.StatusInternalServerError, wantErr: "inspect_failed"},
+		{name: "reject wrong provider", id: "cbx_abcdef123456", provider: "external", wantErr: "provider"},
+		{name: "release verified lease", id: "cbx_abcdef123456", provider: "aws", wantRelease: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			isolateTestUserDirs(t)
+			releases := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+test.id:
+					if test.leaseStatus != 0 {
+						http.Error(w, `{"error":"inspect_failed"}`, test.leaseStatus)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+						ID: test.id, Provider: test.provider, State: "active",
+					}})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+test.id+"/release":
+					releases++
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+						ID: test.id, Provider: "aws", State: "released",
+					}})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+				"--provider", "aws", "--id", test.id, "--force",
+			})
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("stop --force err=%v, want %q", err, test.wantErr)
+			}
+			if test.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if releases != test.wantRelease {
+				t.Fatalf("release requests=%d want %d", releases, test.wantRelease)
+			}
+		})
 	}
 }
 

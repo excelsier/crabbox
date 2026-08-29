@@ -25,7 +25,10 @@ For non-interactive environments, Machine0 also supports
 `MACHINE0_API_TOKEN`. Authentication remains owned by Machine0: Crabbox passes
 the current process environment to the CLI but never reads, logs, or persists
 the token. `crabbox doctor --provider machine0` checks the CLI, authentication,
-inventory, and live size catalog without creating a VM.
+inventory, live size catalog, and the same SSH-key prerequisites used before
+new VM creation. It does not create VMs, upload/download keys, or change the
+account default. `ssh_key_prerequisites=checked` is not proof of successful
+guest SSH authentication; runtime remains unchecked without a running lease.
 
 ## Quick start
 
@@ -111,6 +114,22 @@ direct SSH host-key handling. The provider-owned path overrides a generic
 provider-owned key identity. Set `SSH_KEY_PATH` when Machine0 uses a custom key
 directory.
 
+Before creating a VM with a PUBLIC key, Crabbox checks the selected key's local
+filename and rejects a proven mismatch with the registered public key. It uses
+noninteractive `ssh-keygen -y` on the private file, not its `.pub` sidecar.
+Encrypted or unsupported keys, nonregular files, and missing public metadata remain unverified;
+this check does not prove that SSH authentication will succeed. Crabbox never
+changes the selected key or downloads PUBLIC private keys to repair a mismatch.
+
+When no default key is registered and no explicit key is selected, the native
+Machine0 CLI falls back to `id_rsa` and `id_rsa.pub` under `SSH_KEY_PATH` (or
+`~/.ssh`). Doctor and new creation require both to be regular files before
+allowing that path. Their presence does not prove their contents form a usable
+key pair. Doctor never invokes the native fallback, which can upload a public
+key during creation. To avoid that fallback, select an existing managed or
+PUBLIC key with `--machine0-key`. Replaying an already-owned fixed lease keeps
+its recorded key identity and does not recheck today's default-key selection.
+
 Machine0 SSH targets use a provider-isolated host-trust file under
 `<key-directory>/crabbox/machine0/known_hosts.d/`, keyed by a hash of the
 immutable Machine0 machine ID. The directory is private (`0700`), OpenSSH host
@@ -135,9 +154,12 @@ classes, using shapes from the Machine0 size catalog:
 | `large` | `4xl` | 32 | 128 GB |
 | `beast` | `5xl` | 48 | 192 GB |
 
-The authoritative `classCatalog` in `crabbox providers --json` and
+The static `classCatalog` in `crabbox providers --json` and
 `crabbox providers describe machine0 --json` reports these mappings. Machine0
 does not appear in the legacy top-level `classes` compatibility projection.
+These aliases are conditional creation choices, not a guarantee of current
+availability or a way to resize an existing machine. The live native size
+catalog is authoritative for sizes, resources, prices, and available regions.
 
 An explicitly configured `machine0.size`, `CRABBOX_MACHINE0_SIZE`, or
 `--machine0-size` always wins over a portable class, even when the selected size
@@ -168,6 +190,25 @@ partially created VM unless `--keep` was explicit.
 
 ## Lifecycle and reuse
 
+Native size, region, image, image version, desktop image, and registered key
+select a new machine. Their flags report `creationOnly: true` in
+`crabbox providers describe machine0 --json`. Machine0 has no supported in-place
+resize: changing these selectors or a generic class does not resize or replace
+an existing lease. Reuse reports the observed machine size and retains its
+immutable Machine0 ID. Config values and class labels are selection intent,
+not evidence of an existing machine's capacity. Creating or forking a separate
+machine remains a distinct lifecycle operation.
+
+Prewarm uses these selectors for creation but does not forward their flags to
+hydration or probes, which reuse the created lease. It validates the provider
+configuration those follow-ups will reload before allocating a machine. A
+creation override does not repair an invalid saved value for a follow-up;
+correct the saved configuration first.
+
+CLI path, work root, release policy, polling interval, and creation timeout
+remain usable with existing machines. Despite its name, creation timeout also
+bounds resume, suspend, and checkpoint waits.
+
 `machine0 new` returns before a VM is usable. Crabbox polls `get --json` through
 `CREATING` and `STARTING`, requires a `RUNNING` VM with an IP, and treats
 `ERRORED` and `UNAVAILABLE` as terminal failures with the Machine0 diagnostic.
@@ -180,13 +221,40 @@ stop/start preserves an IP, while suspend removes compute and a later start can
 assign a different IP. Crabbox always prefers `defaultSSHUsername` returned by
 Machine0, falling back to `ubuntu` for Ubuntu and `nix` for NixOS.
 
+For canonical dashed UUID lookups (`8-4-4-4-12` hexadecimal digits), Crabbox
+reads `machine0 ls --json`, validates the inventory and every row's UUID, and
+requires exactly one matching UUID, ignoring hexadecimal letter case. It then
+fetches full details with `machine0 get <current-name> --json` and requires both
+the original UUID and the selected name to match. Inventory summaries are never
+returned as full details: they can omit the SSH key, default SSH username, and
+other metadata. Ordinary name lookups, including named readiness polls, remain
+direct detail reads without an extra inventory request.
+
+Only a successful, complete, valid inventory with no exact UUID match reports
+the UUID as absent from the current authorized inventory. Missing or malformed
+IDs, duplicate matches, authentication/read/JSON errors, and failed detail
+reads fail closed; they do not establish absence. A reused name or a UUID/name
+change between inventory and detail reads is rejected. The name is only a
+transport address: CloudID, ImmutableID, and claim scope remain bound to the
+UUID, and lookup does not delete or rebind claims. This verifies identity across
+the lookup reads; it does not make later name-addressed mutations atomic with
+those reads or remove the existing remote name-reuse race before mutation.
+
 Use `--keep` to keep a normal Crabbox run lease for later reuse. Adopt an
 existing unclaimed Machine0 VM only through an explicit `--reclaim` reuse;
 destructive release requires an exact local claim bound to the Machine0 ID.
 
+If a local claim is missing, a canonical Crabbox lease ID can suggest a
+Crabbox-named VM from Machine0 inventory, but the short name hash cannot prove
+the full lease identity. Even a unique match fails closed with a candidate-name
+hint. Inspect that machine and use its explicit name with `--reclaim` to adopt
+it; Crabbox fetches its full details, including its SSH key and endpoint.
+Discovery alone never authorizes reuse or deletion.
+
 Machine0 VM names are limited to 31 lowercase letters, digits, and hyphens.
 Crabbox truncates only the human slug portion and retains an eight-character
-lease hash, so long requested slugs remain deterministic and collision-safe.
+lease hash, so long requested slugs remain deterministic. The short hash can
+collide; durable claims, not name hashes, establish lease ownership.
 
 ### Fixed-ID replay
 
@@ -255,6 +323,12 @@ crabbox checkpoint fork <checkpoint-id> --slug experiment
 crabbox checkpoint delete <checkpoint-id>
 ```
 
+Verified inspection and listing (`--verify`), deletion, and pruning use the
+current Crabbox configuration, including `machine0.cliPath` (or
+`CRABBOX_MACHINE0_CLI`) and `machine0.pollInterval`. A custom executable does
+not need to be on `PATH`. Provider-backed deletion keeps the local checkpoint
+record if configuration or resource verification fails.
+
 Creation flushes a running source over SSH, calls `machine0 stop`, waits for
 exact `STOPPED`, and then uses `machine0 images save <vm> <image>`. The VM stays
 stopped while Crabbox polls the exact metadata-matching version until its
@@ -299,12 +373,13 @@ compared with `5s`; a 20-minute boot needs roughly 20 polls instead of roughly
 additional readiness-observation latency is negligible beside the documented
 15-minute timeout and observed 10–21-minute creation windows.
 
-When the CLI returns the exact `Rate limited. Please wait a moment and try
-again.` response, Crabbox quietly retries read-only inventory and status calls
-(`get`, `ls`, sizes, and image reads) until the current command's context
+When the CLI returns either exact `Rate limited. Please wait a moment and try
+again.` or `The cloud provider is temporarily unavailable. Please try again
+shortly.` response, Crabbox quietly retries read-only inventory and status
+calls (`get`, `ls`, sizes, and image reads) until the current command's context
 expires or is canceled. The retry cadence follows `machine0.pollInterval`
 (default `60s`, with a one-second minimum) and prints only one concise warning.
-A cached-credentials warning preceding the rate-limit response does not prevent
+A cached-credentials warning preceding either response does not prevent
 recognition.
 
 Crabbox never automatically retries Machine0 mutations such as create, start,
@@ -365,7 +440,7 @@ instead of baking secrets into a reusable image.
 
 ## CLI contract
 
-The adapter uses the documented CLI, currently tested with
+The adapter uses the documented CLI. Prior lifecycle testing used
 `@machine0/cli` 1.0.155:
 
 - `machine0 new`, `get --json`, `ls --json`, `start`, `suspend --yes`, and
@@ -374,6 +449,26 @@ The adapter uses the documented CLI, currently tested with
 - `machine0 sizes --all --json` for live availability and prices;
 - `machine0 images ls/get/save/rm` and image-version removal for native
   checkpoints.
+
+On 2026-08-28, read-only checks with `@machine0/cli` 1.0.164 observed native
+`get <UUID>` returning `No such procedure` for an existing VM, while inventory
+and full details by name succeeded under the same authentication. The repaired
+Crabbox UUID lookup returned that same VM's verified identity and SSH username;
+an absent UUID returned a clean absence error. A missing-procedure error alone
+neither diagnoses authentication failure nor establishes resource existence.
+These checks did not verify the full 1.0.164 lifecycle. The
+[public 1.0.164 package](https://registry.npmjs.org/@machine0/cli/-/cli-1.0.164.tgz)
+routes canonical UUIDs to `machines.getMachineById`, names to
+`machines.getByName`, and inventory to `machines.list` through the same CLI
+authentication client. The [native machine command documentation](https://docs.machine0.io/cli/machines)
+describes `get <vm>`; the separately documented MCP UUID lookup uses a different
+transport and is not Crabbox's CLI contract.
+
+Crabbox therefore resolves canonical UUIDs through inventory and verified
+name-addressed full details without issuing native UUID `get` first or matching
+an error message to trigger a fallback. Both reads retain the existing outage
+retry behavior. Mutations remain single-attempt, with existing ownership guards
+unchanged; no direct API or MCP authentication path is added.
 
 Crabbox does not use Machine0's published OpenAPI document because it is not
 the VM control-plane contract. All command execution is behind an injectable

@@ -81,6 +81,12 @@ Docker Desktop-specific APIs. Crabbox detects an installed `docker` or `podman`
 CLI and uses that runtime. Set `localContainer.runtime` when you need a specific
 CLI.
 
+Runtime discovery rejects empty Docker context, endpoint, or daemon identities
+and empty Podman identities, even when the runtime command exits successfully.
+If the command supplies stderr, Crabbox includes its bounded diagnostic in the
+error so daemon startup failures are not hidden behind an empty-identity message.
+These failures stop acquisition before a lease or container is created.
+
 ### Fixed-ID replay
 
 ```sh
@@ -132,6 +138,10 @@ in `--preflight` output. A mismatch or unrecognized daemon response fails before
 container creation. Crabbox never adds `--platform` or opts into emulation for
 this assertion. When `--arch` is omitted, the runtime keeps its existing native
 behavior without an added architecture guarantee or probe.
+`config show` describes this omitted-architecture state as `arch=native`
+(JSON: `"architecture":"native"`), rather than presenting the compiled AMD64
+compatibility default as an effective runtime architecture. Explicit selections
+remain `amd64` or `arm64`; `native` is output-only.
 
 ### Memory-failure evidence
 
@@ -232,8 +242,18 @@ metadata updates.
 
 ## Lease behavior
 
+Custom cache directories must be mounted into the Docker VM. If cache settings
+change after creation, stop refuses to delete an existing bootstrap directory
+outside the current trusted cache/temp roots and retains the claim and key.
+Restore the original cache settings, or explicitly remove the verified residue,
+then retry stop. Orphan cleanup also preserves claims with bootstrap residue.
+Bootstrap paths from older releases under the current system temp root remain
+supported.
+
 1. `warmup` or a fresh `run` creates a per-lease SSH key.
-2. The provider runs `docker run -d` with Crabbox labels, loopback SSH port
+2. The provider writes its bootstrap script under the user's cache directory,
+   normally shared with desktop Docker VMs, then runs
+   `docker run -d` with Crabbox labels, loopback SSH port
    publishing, and the public-key auth environment the bootstrap script needs.
 3. On Debian/Ubuntu-compatible images, the container installs
    `openssh-server`, `git`, `rsync`, `curl`, and `sudo` when they are missing,
@@ -244,8 +264,16 @@ metadata updates.
 4. With `--desktop`, the container installs and starts Xvfb, XFCE, x11vnc,
    xdotool, screenshot tools, ffmpeg, noVNC, and websockify — no systemd
    required.
-5. With `--browser`, the container installs a real package-manager browser where
-   the image provides one and writes `/var/lib/crabbox/browser.env`.
+5. With `--browser`, the container preserves a working Chrome, Chromium, Firefox
+   ESR, or Firefox executable and writes `/var/lib/crabbox/browser.env`. When
+   Ubuntu needs a browser, bootstrap installs native Firefox from Mozilla's
+   signed APT repository, with a pinned signing-key fingerprint and a
+   source-specific keyring; it excludes Ubuntu's Snap transition package.
+   Other Debian-compatible images try their distro Chromium, Firefox ESR, and
+   Firefox packages in order, advancing when the executable's version probe
+   fails. If Mozilla trust or installation fails, select a prebuilt image with
+   a working browser or a supported Debian image; bootstrap does not disable
+   authentication or force a downgrade of an installed transition package.
 6. As soon as the runtime returns an exact container ID, before the first
    inspect or readiness probe, Crabbox durably records a `state=provisioning`
    claim bound to that ID, the runtime context/endpoint/daemon identity, SSH

@@ -71,6 +71,17 @@ func (a App) configShow(args []string) error {
 	return nil
 }
 
+func configArchitectureForShow(cfg Config) string {
+	if !cfg.architectureExplicit {
+		if provider, err := ProviderFor(cfg.Provider); err == nil {
+			if describer, ok := provider.(ProviderConfigArchitectureDescriber); ok {
+				return describer.DescribeImplicitArchitecture(cfg)
+			}
+		}
+	}
+	return effectiveArchitectureForConfig(cfg)
+}
+
 func effectiveConfigForShow(cfg Config) Config {
 	cfg.Hostinger.WorkRoot = EffectiveHostingerWorkRoot(cfg)
 	cfg.Vast.WorkRoot = EffectiveVastWorkRoot(cfg)
@@ -159,7 +170,8 @@ func configShowView(cfg Config) map[string]any {
 		"providerSelected":           providerSelected,
 		"providerSource":             cfg.providerSelectionSource,
 		"target":                     cfg.TargetOS,
-		"architecture":               effectiveArchitectureForConfig(cfg),
+		"architecture":               configArchitectureForShow(cfg),
+		"architectureExplicit":       IsArchitectureExplicit(cfg),
 		"os":                         cfg.OSImage,
 		"windowsMode":                cfg.WindowsMode,
 		"class":                      cfg.Class,
@@ -703,6 +715,26 @@ func configShowView(cfg Config) map[string]any {
 			"fullClone":   cfg.Proxmox.FullClone,
 			"insecureTLS": cfg.Proxmox.InsecureTLS,
 		},
+		"incus": map[string]any{
+			"remote":            cfg.Incus.Remote,
+			"project":           cfg.Incus.Project,
+			"address":           redactedConfigURL(cfg.Incus.Address),
+			"socket":            cfg.Incus.Socket,
+			"instanceType":      cfg.Incus.InstanceType,
+			"image":             cfg.Incus.Image,
+			"profile":           cfg.Incus.Profile,
+			"user":              cfg.Incus.User,
+			"workRoot":          cfg.Incus.WorkRoot,
+			"deleteOnRelease":   cfg.Incus.DeleteOnRelease,
+			"startTimeout":      cfg.Incus.StartTimeout.String(),
+			"launchPort":        cfg.Incus.LaunchPort,
+			"proxyListenHost":   cfg.Incus.ProxyListenHost,
+			"proxyListenPort":   cfg.Incus.ProxyListenPort,
+			"proxyDevice":       cfg.Incus.ProxyDevice,
+			"tlsServerCert":     cfg.Incus.TLSServerCert,
+			"insecureTLS":       cfg.Incus.InsecureTLS,
+			"remoteImageServer": redactedConfigURL(cfg.Incus.RemoteImageServer),
+		},
 		"firecracker": map[string]any{
 			"binary":          cfg.Firecracker.Binary,
 			"jailer":          cfg.Firecracker.Jailer,
@@ -779,7 +811,7 @@ func redactedParallelsHostConfigs(hosts []ParallelsHostConfig) []ParallelsHostCo
 }
 
 func writeConfigShowText(w io.Writer, cfg Config) {
-	fmt.Fprintf(w, "config=%s\n", userConfigPath())
+	fmt.Fprintf(w, "config=%s\n", writableConfigPath())
 	provider := cfg.Provider
 	serverType := cfg.ServerType
 	providerSelected := providerSelectionIsActionable(cfg)
@@ -787,7 +819,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 		provider = ""
 		serverType = ""
 	}
-	fmt.Fprintf(w, "provider=%s provider_selected=%t provider_source=%s target=%s arch=%s os=%s windows_mode=%s class=%s type=%s profile=%s\n", provider, providerSelected, cfg.providerSelectionSource, cfg.TargetOS, effectiveArchitectureForConfig(cfg), cfg.OSImage, cfg.WindowsMode, cfg.Class, serverType, cfg.Profile)
+	fmt.Fprintf(w, "provider=%s provider_selected=%t provider_source=%s target=%s arch=%s architecture_explicit=%t os=%s windows_mode=%s class=%s type=%s profile=%s\n", provider, providerSelected, cfg.providerSelectionSource, cfg.TargetOS, configArchitectureForShow(cfg), IsArchitectureExplicit(cfg), cfg.OSImage, cfg.WindowsMode, cfg.Class, serverType, cfg.Profile)
 	fmt.Fprintf(w, "broker=%s mode=%s auto_webvnc=%t login_redirect_origins=%s auth=%s admin_auth=%s\n", blank(redactedConfigURL(cfg.Coordinator), "-"), cfg.BrokerMode, cfg.BrokerAutoWebVNC, blank(strings.Join(cfg.BrokerLoginRedirectOrigins, ","), "-"), coordinatorTokenState(cfg), tokenState(cfg.CoordAdminToken))
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)

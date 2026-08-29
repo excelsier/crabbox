@@ -30,6 +30,13 @@ ordered events as it advances:
 - `lease.released`
 - `run.failed` (if the run errors before the command finishes)
 
+Crabbox-generated event messages are redacted before they enter coordinator
+storage. The recorder removes configured and provider-discovered runtime
+credentials, authorization headers, credential-bearing URLs, and other known
+secret encodings while preserving useful diagnostic context. Raw `stdout` and
+`stderr` event data and retained command logs remain caller-owned output and are
+not automatically redacted.
+
 Each event carries a sequence number, type, phase, and stream. Streamed output
 events are capped at **64 KiB total per run**; once the cap is hit the CLI emits
 a single `output.truncated` marker pointing you at `crabbox logs` for the full
@@ -119,7 +126,11 @@ command runs.
 On a non-zero exit, SSH-backed and Blacksmith delegated runs also write a local
 failure bundle under `.crabbox/captures/` by default (the bundled streams are
 capped at 16 MiB each). `--capture-on-fail` is accepted as a no-op compatibility
-alias; bundles save automatically on failure. Treat captured logs and bundles as
+alias; bundles save automatically on failure. An unwritable project capture
+destination falls back to the Crabbox user state directory's `captures/`
+subdirectory; the `failure-bundle local=...` line reports the actual path. See
+[local capture storage](../observability.md#capturing-run-output-locally) for
+fallback boundaries and retention. Treat captured logs and bundles as
 secret-bearing files unless you redact them before sharing.
 
 ## Phase timings
